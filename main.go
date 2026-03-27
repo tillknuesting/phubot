@@ -128,17 +128,25 @@ var (
 
 // Agent configuration constants
 const (
-	// ReserveTokens is the token count threshold that triggers context compaction.
-	// When the conversation history exceeds this limit, older messages are
-	// summarized and compacted to stay within the context window.
-	// Default: 16384 tokens (suitable for 32K context windows)
-	ReserveTokens = 16384
+	// DefaultContextWindow is the default context window size in tokens.
+	// This should match or be less than your model's actual context window.
+	// Default: 40000 tokens (suitable for most modern models, lower than OpenClaw's 200K)
+	DefaultContextWindow = 40000
 
-	// KeepRecentTokens is the token budget reserved for recent messages
-	// during compaction. This ensures the most recent context is preserved
-	// while older messages are summarized.
-	// Default: 20000 tokens
-	KeepRecentTokens = 20000
+	// ReserveTokensRatio is the ratio of context window that triggers compaction.
+	// When tokens exceed (ContextWindow * ReserveTokensRatio), compaction starts.
+	// Default: 0.70 (70% of context window, more aggressive than OpenClaw's 0.75)
+	ReserveTokensRatio = 0.70
+
+	// KeepRecentTokensRatio is the ratio of context window reserved for recent messages.
+	// During compaction, this portion of recent context is always preserved.
+	// Default: 0.85 (85% of context window, more aggressive pruning of old messages)
+	KeepRecentTokensRatio = 0.85
+
+	// MemoryFlushThreshold is the token count remaining when memory flush triggers.
+	// When (CurrentTokens > Reserve - MemoryFlushThreshold), flush memory before compaction.
+	// Default: 4000 tokens (give LLM time to write durable notes before context is lost)
+	MemoryFlushThreshold = 4000
 
 	// DefaultModel is the LLM model identifier used for chat completions.
 	// This should match the model loaded in LM Studio.
@@ -168,6 +176,28 @@ const (
 	// Facts extracted here persist across conversation sessions in the memory file.
 	MemoryFlushPrompt = "Extract all important facts, state, and context from this conversation that should be remembered long-term. Format as bullet points. Include names, numbers, decisions, and any information that would be important to know if the conversation were summarized."
 )
+
+// Tool result pruning configuration (Tier 1 - OpenClaw style)
+type PruningConfig struct {
+	Mode                 string  // "off", "conservative", "aggressive"
+	SoftTrimRatio        float64 // Trim when this ratio of context is tool results (0.25 = 25%)
+	HardClearRatio       float64 // Clear when this ratio of context is tool results (0.40 = 40%)
+	SoftTrimMaxChars     int     // Maximum chars to keep in soft-trimmed results
+	SoftTrimHeadChars    int     // Characters to keep from start of result
+	SoftTrimTailChars    int     // Characters to keep from end of result
+	HardClearPlaceholder string  // Placeholder text when hard-clearing results
+}
+
+// Default pruning configuration
+var DefaultPruningConfig = PruningConfig{
+	Mode:                 "aggressive", // More aggressive than OpenClaw
+	SoftTrimRatio:        0.20,         // Trim when 20% of context is tool results
+	HardClearRatio:       0.35,         // Clear when 35% is tool results
+	SoftTrimMaxChars:     3000,         // Keep max 3000 chars in trimmed results
+	SoftTrimHeadChars:    1000,         // Keep first 1000 chars
+	SoftTrimTailChars:    1000,         // Keep last 1000 chars
+	HardClearPlaceholder: "[Previous tool result cleared to save context]",
+}
 
 // ==========================================
 // TOKEN COUNTING
@@ -913,12 +943,14 @@ type Agent struct {
 	wal              *WAL                           // Write-Ahead Log for persistence
 	memory           *Memory                        // Long-term memory system
 	model            string                         // LLM model identifier
-	reserveTokens    int                            // Token threshold for compaction trigger
-	keepRecentTokens int                            // Token budget for recent messages
+	contextWindow    int                            // Total context window in tokens
+	reserveTokens    int                            // Token threshold for compaction trigger (calculated)
+	keepRecentTokens int                            // Token budget for recent messages (calculated)
 	summarizer       SummarizeFunc                  // Custom summarization function (optional)
 	baseSystemPrompt string                         // Base system prompt (without memory)
 	toolTimeout      time.Duration                  // Maximum tool execution time
 	loopDetector     *LoopDetector                  // Detects infinite tool call loops
+	pruningConfig    PruningConfig                  // Tool result pruning configuration
 }
 
 // LoopDetector identifies when the LLM is stuck in a repetitive tool call pattern.
@@ -1059,26 +1091,35 @@ func similarity(s1, s2 string) float64 {
 //
 // Default Configuration:
 //   - Model: DefaultModel ("qwen3.5-9b-mlx")
-//   - ReserveTokens: 16384
-//   - KeepRecentTokens: 20000
+//   - ContextWindow: 40000 tokens
+//   - ReserveTokens: 70% of context window (calculated)
+//   - KeepRecentTokens: 85% of context window (calculated)
 //   - ToolTimeout: 30 seconds
 //   - LoopDetector: enabled with default settings
+//   - Pruning: aggressive mode (20% soft trim, 35% hard clear)
 //
 // The agent automatically:
 //   - Loads conversation history from WAL (if provided)
 //   - Injects a system prompt with memory (if available)
 //   - Initializes the tool registry (empty, use RegisterTool)
 func NewAgent(client *openai.Client, wal *WAL) *Agent {
+	// Calculate dynamic thresholds based on context window
+	contextWindow := DefaultContextWindow
+	reserveTokens := int(float64(contextWindow) * ReserveTokensRatio)
+	keepRecentTokens := int(float64(contextWindow) * KeepRecentTokensRatio)
+
 	a := &Agent{
 		client:           client,
 		tools:            make(map[string]Tool),
 		wal:              wal,
 		model:            DefaultModel,
-		reserveTokens:    ReserveTokens,
-		keepRecentTokens: KeepRecentTokens,
+		contextWindow:    contextWindow,
+		reserveTokens:    reserveTokens,
+		keepRecentTokens: keepRecentTokens,
 		baseSystemPrompt: "You are an autonomous OpenClaw-style personal assistant. You have access to a web browser tool. Always use it if the user asks for real-time data like flight prices. Extract the data cleanly.",
 		toolTimeout:      DefaultToolTimeout,
 		loopDetector:     NewLoopDetector(),
+		pruningConfig:    DefaultPruningConfig,
 	}
 
 	// Initialize memory system if WAL is present
@@ -1177,6 +1218,87 @@ func (a *Agent) GetHistory() []openai.ChatCompletionMessage {
 	return result
 }
 
+// ClearHistory wipes the conversation history and starts fresh.
+// Keeps the system prompt, archives the old WAL, and creates a new empty history.
+// Use this to start a new session without losing memory.
+func (a *Agent) ClearHistory() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	log.Printf("[Agent] Clearing conversation history...")
+
+	// Archive old WAL if it exists
+	if a.wal != nil {
+		// Rename old WAL to archive
+		archivePath := a.wal.path + ".archived." + time.Now().Format("20060102-150405")
+		if err := os.Rename(a.wal.path, archivePath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[Agent] Failed to archive old WAL: %v", err)
+		} else {
+			log.Printf("[Agent] Archived old WAL to %s", archivePath)
+		}
+	}
+
+	// Keep system prompt
+	var systemPrompt openai.ChatCompletionMessage
+	for _, m := range a.history {
+		if m.Role == openai.ChatMessageRoleSystem {
+			systemPrompt = m
+			break
+		}
+	}
+
+	// Reset history with just system prompt
+	a.history = []openai.ChatCompletionMessage{systemPrompt}
+
+	// Rewrite WAL with just system prompt
+	if a.wal != nil {
+		if err := a.wal.Rewrite(a.history); err != nil {
+			return fmt.Errorf("failed to rewrite WAL: %w", err)
+		}
+	}
+
+	log.Printf("[Agent] History cleared, starting fresh session")
+	return nil
+}
+
+// HistoryStats provides statistics about the conversation history.
+type HistoryStats struct {
+	MessageCount     int
+	TokenCount       int
+	ToolResultCount  int
+	OldestMessage    time.Time
+	ContextWindow    int
+	ReserveTokens    int
+	KeepRecentTokens int
+}
+
+// GetHistoryStats returns statistics about the current conversation history.
+func (a *Agent) GetHistoryStats() HistoryStats {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	stats := HistoryStats{
+		MessageCount:     len(a.history),
+		TokenCount:       countTokens(a.history),
+		ContextWindow:    a.contextWindow,
+		ReserveTokens:    a.reserveTokens,
+		KeepRecentTokens: a.keepRecentTokens,
+	}
+
+	for _, m := range a.history {
+		if m.Role == openai.ChatMessageRoleTool {
+			stats.ToolResultCount++
+		}
+	}
+
+	// Estimate oldest message time (approximate)
+	if len(a.history) > 0 {
+		stats.OldestMessage = time.Now().Add(-time.Minute * time.Duration(len(a.history)))
+	}
+
+	return stats
+}
+
 func (a *Agent) updateSystemPromptInWAL() {
 	if a.wal == nil {
 		return
@@ -1250,6 +1372,27 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 	}
 
 	currentTokens := countTokens(a.history)
+
+	// NEW: Memory flush BEFORE compaction when approaching limit
+	// This gives the LLM time to write durable notes before context is lost
+	if currentTokens > a.reserveTokens-MemoryFlushThreshold && currentTokens < a.reserveTokens {
+		if a.memory != nil && a.client != nil {
+			log.Printf("[Compaction] Approaching limit (%d/%d tokens), flushing memory before compaction", currentTokens, a.reserveTokens)
+			if err := a.memory.Flush(ctx, a.client, a.model, a.history); err != nil {
+				log.Printf("[Compaction] Pre-compaction memory flush failed: %v", err)
+			} else {
+				newSysPrompt := a.buildSystemPrompt()
+				for i := range a.history {
+					if a.history[i].Role == openai.ChatMessageRoleSystem {
+						a.history[i].Content = newSysPrompt
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Check if compaction needed
 	if currentTokens < a.reserveTokens {
 		return nil
 	}
@@ -1312,6 +1455,86 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 }
 
 // ==========================================
+// TOOL RESULT PRUNING (Tier 1 - OpenClaw Style)
+// ==========================================
+
+// pruneToolResults trims oversized tool results before sending to LLM.
+// This is Tier 1 pruning - happens per-request, in-memory only.
+// Does NOT modify on-disk WAL history.
+//
+// Strategy:
+//   - Calculate tool result token ratio
+//   - If > SoftTrimRatio: soft trim (keep head + tail)
+//   - If > HardClearRatio: hard clear (replace with placeholder)
+func (a *Agent) pruneToolResults(history []openai.ChatCompletionMessage) []openai.ChatCompletionMessage {
+	if a.pruningConfig.Mode == "off" {
+		return history
+	}
+
+	// Calculate total tokens and tool result tokens
+	totalTokens := 0
+	toolResultTokens := 0
+	toolResultIndices := []int{}
+
+	for i, msg := range history {
+		msgTokens := countTokens([]openai.ChatCompletionMessage{msg})
+		totalTokens += msgTokens
+
+		if msg.Role == openai.ChatMessageRoleTool {
+			toolResultTokens += msgTokens
+			toolResultIndices = append(toolResultIndices, i)
+		}
+	}
+
+	if totalTokens == 0 || toolResultTokens == 0 {
+		return history
+	}
+
+	// Calculate ratio
+	toolResultRatio := float64(toolResultTokens) / float64(totalTokens)
+
+	// Check if pruning needed
+	if toolResultRatio < a.pruningConfig.SoftTrimRatio {
+		return history
+	}
+
+	log.Printf("[Pruning] Tool result ratio %.2f%% exceeds threshold %.2f%%, pruning %d tool results",
+		toolResultRatio*100, a.pruningConfig.SoftTrimRatio*100, len(toolResultIndices))
+
+	// Create pruned copy
+	pruned := make([]openai.ChatCompletionMessage, len(history))
+	copy(pruned, history)
+
+	// Determine pruning strategy
+	useHardClear := toolResultRatio >= a.pruningConfig.HardClearRatio
+
+	for _, idx := range toolResultIndices {
+		if useHardClear {
+			// Hard clear: replace entire result with placeholder
+			pruned[idx].Content = a.pruningConfig.HardClearPlaceholder
+			log.Printf("[Pruning] Hard-cleared tool result at index %d", idx)
+		} else {
+			// Soft trim: keep head + tail
+			content := pruned[idx].Content
+			if len(content) > a.pruningConfig.SoftTrimMaxChars {
+				head := content[:min(a.pruningConfig.SoftTrimHeadChars, len(content))]
+				tail := ""
+				tailStart := len(content) - a.pruningConfig.SoftTrimTailChars
+				if tailStart > a.pruningConfig.SoftTrimHeadChars {
+					tail = content[tailStart:]
+				}
+				pruned[idx].Content = fmt.Sprintf("%s\n\n... [trimmed %d chars] ...\n\n%s",
+					head, len(content)-len(head)-len(tail), tail)
+				log.Printf("[Pruning] Soft-trimmed tool result at index %d (%d -> %d chars)",
+					idx, len(content), len(pruned[idx].Content))
+			}
+		}
+	}
+
+	return pruned
+}
+
+// ==========================================
 // OPENCLAW CONCEPT 4: THE ReAct (Reason + Act) ENGINE
 // ==========================================
 
@@ -1333,6 +1556,9 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 	historyCopy := make([]openai.ChatCompletionMessage, len(a.history))
 	copy(historyCopy, a.history)
 	a.mu.RUnlock()
+
+	// NEW: Prune tool results before sending to LLM (Tier 1)
+	historyCopy = a.pruneToolResults(historyCopy)
 
 	for range 5 {
 		req := openai.ChatCompletionRequest{
@@ -1879,8 +2105,10 @@ func main() {
 		return
 	}
 
-	fmt.Println("Phubot CLI - Type 'exit' to quit")
+	fmt.Println("Phubot CLI - Personal AI Assistant")
 	fmt.Println("-----------------------------------")
+	fmt.Println("Commands: exit, /new, /clear, /stats, tasks, cancel <id>")
+	fmt.Println()
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -1892,6 +2120,42 @@ func main() {
 			break
 		}
 		if text == "" {
+			continue
+		}
+
+		// Session management commands
+		if text == "/new" || text == "/clear" {
+			if err := agent.ClearHistory(); err != nil {
+				fmt.Printf("Error clearing history: %v\n", err)
+			} else {
+				fmt.Println("✅ Started fresh session (memory preserved)")
+			}
+			continue
+		}
+
+		if text == "/stats" {
+			stats := agent.GetHistoryStats()
+			fmt.Printf("📊 Session Statistics:\n")
+			fmt.Printf("  Messages: %d\n", stats.MessageCount)
+			fmt.Printf("  Tokens: %d / %d (%.1f%%)\n",
+				stats.TokenCount, stats.ContextWindow,
+				float64(stats.TokenCount)/float64(stats.ContextWindow)*100)
+			fmt.Printf("  Tool Results: %d\n", stats.ToolResultCount)
+			fmt.Printf("  Reserve Threshold: %d tokens (%.0f%%)\n",
+				stats.ReserveTokens, ReserveTokensRatio*100)
+			fmt.Printf("  Keep Recent: %d tokens (%.0f%%)\n",
+				stats.KeepRecentTokens, KeepRecentTokensRatio*100)
+			fmt.Printf("  Compaction: %s\n",
+				func() string {
+					if stats.TokenCount > stats.ReserveTokens {
+						return "⚠️  TRIGGERED (exceeds reserve)"
+					}
+					approaching := stats.ReserveTokens - MemoryFlushThreshold
+					if stats.TokenCount > approaching {
+						return fmt.Sprintf("⚠️  APPROACHING (flush at %d tokens)", approaching)
+					}
+					return "✅ OK"
+				}())
 			continue
 		}
 
