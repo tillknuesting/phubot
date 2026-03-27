@@ -1,3 +1,45 @@
+/*
+Package main implements Phubot, a persistent autonomous AI assistant.
+
+Phubot is a personal AI agent that operates a ReAct (Reason + Act) loop,
+maintains conversational memory, and actuates in the real world using a
+dynamic Tool Registry.
+
+Architecture Overview:
+
+The system is organized into 5 strict layers:
+ 1. Tool Registry - Isolated capabilities (browser, scheduler, etc.)
+ 2. Gateway - I/O boundary (CLI, Telegram)
+ 3. State & Memory - Conversation history and long-term memory
+ 4. Browser Engine - Real-world actuation via Chrome DevTools Protocol
+ 5. ReAct Engine - The main reasoning and execution loop
+
+Key Features:
+  - ReAct loop with circuit breaker (max 5 iterations)
+  - Persistent conversation history via Write-Ahead Log (WAL)
+  - Automatic context compaction for local LLMs
+  - Tool registry with dynamic registration
+  - Browser automation with anti-detection
+  - Task scheduler for periodic execution
+  - Long-term memory with rotation
+  - Telegram gateway with vision support
+
+Usage:
+
+	# CLI mode
+	./phubot
+
+	# Telegram mode
+	./phubot -telegram $TOKEN -allowed 123456789
+
+Configuration:
+
+	LM_STUDIO_URL - LM Studio server URL (default: http://127.0.0.1:1234/v1)
+	TELEGRAM_TOKEN - Telegram bot token (for Telegram mode)
+	ALLOWED_USERS - Comma-separated Telegram user IDs (optional)
+
+See README.md for complete documentation.
+*/
 package main
 
 import (
@@ -26,38 +68,120 @@ import (
 // OPENCLAW CONCEPT 1: THE SKILL / TOOL REGISTRY
 // ==========================================
 
+// Tool defines the interface for pluggable capabilities.
+// All tools must implement this interface to be registered with the Agent.
+// Tools are isolated capabilities that can be dynamically added without
+// modifying the core agent logic.
 type Tool interface {
+	// Name returns the unique identifier for this tool.
+	// This is used by the LLM to reference the tool in tool calls.
 	Name() string
+
+	// Definition returns the OpenAI tool definition with JSON Schema.
+	// This describes the tool's parameters to the LLM, enabling it to
+	// generate properly structured tool calls.
 	Definition() openai.Tool
+
+	// Execute runs the tool's logic with the provided JSON arguments.
+	// The args string contains JSON-encoded parameters matching the schema
+	// from Definition(). Returns a string result or an error.
+	//
+	// IMPORTANT: Tool errors should NOT crash the program. Instead, return
+	// the error as a string so the LLM can reason about the failure and retry.
 	Execute(args string) (string, error)
 }
 
+// ToolWithContext is an extended Tool interface that supports context
+// for timeout and cancellation. Tools that perform long-running operations
+// (like browser automation) should implement this interface instead of Tool.
+//
+// The Agent will automatically detect and use ExecuteWithContext when available,
+// providing timeout protection via the Agent's toolTimeout configuration.
 type ToolWithContext interface {
 	Name() string
 	Definition() openai.Tool
+
+	// ExecuteWithContext runs the tool with context support for cancellation.
+	// The context should be respected for all long-running operations.
+	// Implementations should select on ctx.Done() to enable graceful cancellation.
 	ExecuteWithContext(ctx context.Context, args string) (string, error)
 }
 
+// ==========================================
+// CONFIGURATION CONSTANTS
+// ==========================================
+
+// WAL configuration
 var (
+	// WALMaxSize is the maximum size of the WAL file before rotation (5MB).
+	// When exceeded, older messages are trimmed to keep the file size manageable.
 	WALMaxSize = 5 * 1024 * 1024
-	WALDir     = ".phubot"
-	WALFile    = "history.wal"
+
+	// WALDir is the directory where persistent data is stored.
+	// Default: .phubot in the current working directory.
+	WALDir = ".phubot"
+
+	// WALFile is the filename for the Write-Ahead Log.
+	// Contains the full conversation history in JSON Lines format.
+	WALFile = "history.wal"
 )
 
+// Agent configuration constants
 const (
-	ReserveTokens      = 16384
-	KeepRecentTokens   = 20000
-	DefaultModel       = "qwen3.5-9b-mlx"
+	// ReserveTokens is the token count threshold that triggers context compaction.
+	// When the conversation history exceeds this limit, older messages are
+	// summarized and compacted to stay within the context window.
+	// Default: 16384 tokens (suitable for 32K context windows)
+	ReserveTokens = 16384
+
+	// KeepRecentTokens is the token budget reserved for recent messages
+	// during compaction. This ensures the most recent context is preserved
+	// while older messages are summarized.
+	// Default: 20000 tokens
+	KeepRecentTokens = 20000
+
+	// DefaultModel is the LLM model identifier used for chat completions.
+	// This should match the model loaded in LM Studio.
+	// Default: "qwen3.5-9b-mlx" (Qwen3.5 9B MLX-optimized variant)
+	DefaultModel = "qwen3.5-9b-mlx"
+
+	// DefaultToolTimeout is the maximum duration for tool execution.
+	// Tools that exceed this timeout return an error to the LLM.
+	// Default: 30 seconds (sufficient for most operations including browser)
 	DefaultToolTimeout = 30 * time.Second
-	MemoryMaxSize      = 100 * 1024
+
+	// MemoryMaxSize is the maximum size of the memory file before rotation.
+	// When exceeded, the memory file is archived and a new one is created.
+	// Default: 100KB
+	MemoryMaxSize = 100 * 1024
+
+	// CompactionMinDelay is the minimum time between memory flush operations.
+	// This prevents excessive LLM calls for fact extraction during rapid conversation.
+	// Default: 5 seconds
 	CompactionMinDelay = 5 * time.Second
-	SummaryPrompt      = "Summarize the key facts, decisions, and context from this conversation. Be concise but preserve important details like names, dates, numbers, and decisions made."
-	MemoryFlushPrompt  = "Extract all important facts, state, and context from this conversation that should be remembered long-term. Format as bullet points. Include names, numbers, decisions, and any information that would be important to know if the conversation were summarized."
+
+	// SummaryPrompt is the instruction given to the LLM for summarizing old messages.
+	// It emphasizes preserving key facts while condensing the conversation.
+	SummaryPrompt = "Summarize the key facts, decisions, and context from this conversation. Be concise but preserve important details like names, dates, numbers, and decisions made."
+
+	// MemoryFlushPrompt is the instruction for extracting facts to long-term memory.
+	// Facts extracted here persist across conversation sessions in the memory file.
+	MemoryFlushPrompt = "Extract all important facts, state, and context from this conversation that should be remembered long-term. Format as bullet points. Include names, numbers, decisions, and any information that would be important to know if the conversation were summarized."
 )
 
+// ==========================================
+// TOKEN COUNTING
+// ==========================================
+
+// globalTiktokenEncoding is the shared tokenizer instance for token counting.
+// Uses cl100k_base encoding (same as GPT-3.5/4) for approximate token counts.
+// Initialized lazily via sync.Once for thread safety.
 var globalTiktokenEncoding *tiktoken.Tiktoken
 var globalTiktokenOnce sync.Once
 
+// getTiktokenEncoding returns the global tiktoken encoding instance.
+// Initializes on first call using cl100k_base encoding (compatible with most modern LLMs).
+// Returns nil if initialization fails (fallback to character-based estimation).
 func getTiktokenEncoding() *tiktoken.Tiktoken {
 	globalTiktokenOnce.Do(func() {
 		tke, err := tiktoken.GetEncoding("cl100k_base")
@@ -70,12 +194,21 @@ func getTiktokenEncoding() *tiktoken.Tiktoken {
 	return globalTiktokenEncoding
 }
 
+// ==========================================
+// RATE LIMITING
+// ==========================================
+
+// RateLimiter provides simple rate limiting for API calls.
+// Ensures minimum delay between operations to prevent API abuse.
+// Thread-safe via mutex protection.
 type RateLimiter struct {
-	mu       sync.Mutex
-	minDelay time.Duration
-	lastCall time.Time
+	mu       sync.Mutex    // Protects concurrent access
+	minDelay time.Duration // Minimum time between calls
+	lastCall time.Time     // Timestamp of last successful call
 }
 
+// NewRateLimiter creates a new rate limiter with the specified minimum delay.
+// Negative delays are treated as zero (no rate limiting).
 func NewRateLimiter(minDelay time.Duration) *RateLimiter {
 	if minDelay < 0 {
 		minDelay = 0
@@ -83,6 +216,9 @@ func NewRateLimiter(minDelay time.Duration) *RateLimiter {
 	return &RateLimiter{minDelay: minDelay}
 }
 
+// Wait blocks until the minimum delay has elapsed since the last call.
+// Returns nil on success, or ctx.Err() if the context is cancelled.
+// Thread-safe: can be called from multiple goroutines.
 func (r *RateLimiter) Wait(ctx context.Context) error {
 	if r.minDelay <= 0 {
 		return nil
@@ -107,14 +243,34 @@ func (r *RateLimiter) Wait(ctx context.Context) error {
 }
 
 // ==========================================
-// WAL (Write-Ahead Log)
+// WAL (Write-Ahead Log) - Persistent Conversation History
 // ==========================================
 
+// WAL implements a Write-Ahead Log for durable conversation history storage.
+// It provides crash-safe persistence of all chat messages in an append-only format.
+//
+// Storage Format:
+//   - JSON Lines format (one JSON object per line)
+//   - Each line is a complete openai.ChatCompletionMessage
+//   - File location: .phubot/history.wal
+//   - Automatic rotation when size exceeds WALMaxSize (5MB)
+//
+// Thread Safety:
+//   - All operations are protected by mutex
+//   - Safe for concurrent use from multiple goroutines
+//
+// Recovery:
+//   - On startup, LoadAll() replays the entire conversation history
+//   - Corrupted lines are skipped with a warning log
+//   - If file doesn't exist, returns empty slice (new session)
 type WAL struct {
-	mu   sync.Mutex
-	path string
+	mu   sync.Mutex // Protects concurrent file access
+	path string     // Full path to WAL file
 }
 
+// OpenWAL creates or opens the Write-Ahead Log in the default location.
+// Creates the .phubot directory if it doesn't exist.
+// Returns an error if the directory cannot be created.
 func OpenWAL() (*WAL, error) {
 	dir := WALDir
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -124,6 +280,12 @@ func OpenWAL() (*WAL, error) {
 	return &WAL{path: path}, nil
 }
 
+// Append adds a new message to the Write-Ahead Log.
+// The message is serialized to JSON and appended as a new line.
+// Automatically trims old messages if file size exceeds WALMaxSize.
+//
+// Thread-safe: can be called from multiple goroutines.
+// Returns an error if file operations fail, but never panics.
 func (w *WAL) Append(msg openai.ChatCompletionMessage) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -148,6 +310,15 @@ func (w *WAL) Append(msg openai.ChatCompletionMessage) error {
 	return nil
 }
 
+// LoadAll reads all messages from the Write-Ahead Log.
+// Returns the complete conversation history in chronological order.
+//
+// Behavior:
+//   - Returns empty slice if file doesn't exist (new session)
+//   - Skips corrupted lines with a warning log (resilient to partial writes)
+//   - Uses buffered scanning for large files (up to 1MB per line)
+//
+// Thread-safe: can be called from multiple goroutines.
 func (w *WAL) LoadAll() ([]openai.ChatCompletionMessage, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -162,16 +333,16 @@ func (w *WAL) LoadAll() ([]openai.ChatCompletionMessage, error) {
 
 	var messages []openai.ChatCompletionMessage
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // Support large lines
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
-			continue
+			continue // Skip blank lines
 		}
 		var msg openai.ChatCompletionMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			log.Printf("[WAL] skipping corrupted line: %v", err)
-			continue
+			continue // Skip corrupted entries, don't fail
 		}
 		messages = append(messages, msg)
 	}
@@ -707,44 +878,81 @@ func findRecentStart(messages []openai.ChatCompletionMessage, budget int) int {
 // OPENCLAW CONCEPT 3: PERSISTENT STATE & MEMORY
 // ==========================================
 
+// SummarizeFunc is a pluggable function type for custom summarization strategies.
+// This allows different summarization implementations (LLM-based, heuristic, etc.)
+// The default implementation uses the LLM to generate summaries.
 type SummarizeFunc func(ctx context.Context, prompt string, messages []openai.ChatCompletionMessage) (string, error)
 
+// Agent is the core AI assistant implementing the ReAct (Reason + Act) loop.
+// It maintains conversation history, executes tools, and manages memory.
+//
+// Architecture:
+//   - ReAct Loop: Reason → Act (Tool) → Observe → Repeat (max 5 iterations)
+//   - Tool Registry: Dynamic capability registration
+//   - WAL Persistence: Crash-safe conversation history
+//   - Memory System: Long-term fact storage
+//   - Context Compaction: Automatic token management
+//
+// Thread Safety:
+//   - All public methods are thread-safe
+//   - Protected by sync.RWMutex for concurrent access
+//   - Safe to call from multiple goroutines
+//
+// Usage:
+//
+//	client := openai.NewClientWithConfig(config)
+//	wal, _ := OpenWAL()
+//	agent := NewAgent(client, wal)
+//	agent.RegisterTool(&MyTool{})
+//	reply, _ := agent.Chat(ctx, "Hello")
 type Agent struct {
-	mu               sync.RWMutex
-	client           *openai.Client
-	tools            map[string]Tool
-	history          []openai.ChatCompletionMessage
-	wal              *WAL
-	memory           *Memory
-	model            string
-	reserveTokens    int
-	keepRecentTokens int
-	summarizer       SummarizeFunc
-	baseSystemPrompt string
-	toolTimeout      time.Duration
-	loopDetector     *LoopDetector
+	mu               sync.RWMutex                   // Protects concurrent access to agent state
+	client           *openai.Client                 // OpenAI-compatible client (LM Studio)
+	tools            map[string]Tool                // Registry of available tools
+	history          []openai.ChatCompletionMessage // Conversation history
+	wal              *WAL                           // Write-Ahead Log for persistence
+	memory           *Memory                        // Long-term memory system
+	model            string                         // LLM model identifier
+	reserveTokens    int                            // Token threshold for compaction trigger
+	keepRecentTokens int                            // Token budget for recent messages
+	summarizer       SummarizeFunc                  // Custom summarization function (optional)
+	baseSystemPrompt string                         // Base system prompt (without memory)
+	toolTimeout      time.Duration                  // Maximum tool execution time
+	loopDetector     *LoopDetector                  // Detects infinite tool call loops
 }
 
+// LoopDetector identifies when the LLM is stuck in a repetitive tool call pattern.
+// This provides early detection before the circuit breaker (5 iterations) is reached.
+//
+// Detection Strategy:
+//   - Exact match: Same tool + same args called 3+ times
+//   - Similar match: Same tool + similar args (80%+ word overlap) 3+ times
+//
+// When a loop is detected, a hint is returned to the LLM suggesting alternative approaches.
 type LoopDetector struct {
-	mu              sync.Mutex
-	recentToolCalls []toolCallRecord
-	maxHistory      int
-	loopThreshold   int
+	mu              sync.Mutex       // Protects concurrent access
+	recentToolCalls []toolCallRecord // Circular buffer of recent tool calls
+	maxHistory      int              // Maximum number of calls to track (default: 10)
+	loopThreshold   int              // Number of repeats before triggering (default: 3)
 }
 
+// toolCallRecord stores information about a single tool invocation.
 type toolCallRecord struct {
-	toolName string
-	args     string
-	result   string
+	toolName string // Name of the tool called
+	args     string // JSON-encoded arguments
+	result   string // Tool result (or error message)
 }
 
+// NewLoopDetector creates a new loop detector with default settings.
 func NewLoopDetector() *LoopDetector {
 	return &LoopDetector{
-		maxHistory:    10,
-		loopThreshold: 3,
+		maxHistory:    10, // Track last 10 tool calls
+		loopThreshold: 3,  // Trigger after 3 identical calls
 	}
 }
 
+// record adds a tool call to the detector's history.
+// Thread-safe: can be called from multiple goroutines.
 func (ld *LoopDetector) record(toolName, args, result string) {
 	ld.mu.Lock()
 	defer ld.mu.Unlock()
@@ -755,15 +963,27 @@ func (ld *LoopDetector) record(toolName, args, result string) {
 		result:   result,
 	})
 
+	// Maintain circular buffer size
 	if len(ld.recentToolCalls) > ld.maxHistory {
 		ld.recentToolCalls = ld.recentToolCalls[1:]
 	}
 }
 
+// detectLoop checks if the current tool call would create a loop.
+// Returns (true, hint) if a loop is detected, (false, "") otherwise.
+//
+// Detection Logic:
+//  1. Count exact matches (same tool + same args)
+//  2. Count similar matches (same tool + similar args)
+//  3. If count >= loopThreshold, return hint for LLM
+//
+// The hint provides actionable advice based on whether previous
+// calls resulted in errors or successful extractions.
 func (ld *LoopDetector) detectLoop(toolName, args string) (bool, string) {
 	ld.mu.Lock()
 	defer ld.mu.Unlock()
 
+	// Check for exact matches
 	sameCount := 0
 	var lastResult string
 
@@ -784,6 +1004,7 @@ func (ld *LoopDetector) detectLoop(toolName, args string) (bool, string) {
 		return true, hint
 	}
 
+	// Check for similar matches (same tool, similar args)
 	similarCount := 0
 	for _, call := range ld.recentToolCalls {
 		if call.toolName == toolName && similarity(call.args, args) > 0.8 {
@@ -798,6 +1019,9 @@ func (ld *LoopDetector) detectLoop(toolName, args string) (bool, string) {
 	return false, ""
 }
 
+// similarity calculates the Jaccard similarity between two strings based on word overlap.
+// Returns a value between 0.0 (no similarity) and 1.0 (identical).
+// Used to detect near-duplicate tool calls that aren't exact matches.
 func similarity(s1, s2 string) float64 {
 	if s1 == s2 {
 		return 1.0
@@ -813,6 +1037,7 @@ func similarity(s1, s2 string) float64 {
 		return 0.0
 	}
 
+	// Calculate Jaccard similarity: intersection / union
 	s1Set := make(map[string]bool)
 	for _, w := range s1Words {
 		s1Set[w] = true
@@ -825,9 +1050,24 @@ func similarity(s1, s2 string) float64 {
 		}
 	}
 
+	// Jaccard = intersection / (|A| + |B| - intersection)
 	return float64(2*common) / float64(len(s1Words)+len(s2Words))
 }
 
+// NewAgent creates a new Agent with the provided OpenAI client and optional WAL.
+// If wal is nil, the agent operates without persistence (session-only).
+//
+// Default Configuration:
+//   - Model: DefaultModel ("qwen3.5-9b-mlx")
+//   - ReserveTokens: 16384
+//   - KeepRecentTokens: 20000
+//   - ToolTimeout: 30 seconds
+//   - LoopDetector: enabled with default settings
+//
+// The agent automatically:
+//   - Loads conversation history from WAL (if provided)
+//   - Injects a system prompt with memory (if available)
+//   - Initializes the tool registry (empty, use RegisterTool)
 func NewAgent(client *openai.Client, wal *WAL) *Agent {
 	a := &Agent{
 		client:           client,
@@ -841,6 +1081,7 @@ func NewAgent(client *openai.Client, wal *WAL) *Agent {
 		loopDetector:     NewLoopDetector(),
 	}
 
+	// Initialize memory system if WAL is present
 	if wal != nil {
 		a.memory = NewMemory(filepath.Join(filepath.Dir(wal.path), "memory"))
 	}
