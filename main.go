@@ -26,17 +26,23 @@ Key Features:
 
 Usage:
 
-	# CLI mode
-	./phubot
+		# CLI mode
+		./phubot
 
-	# Telegram mode
-	./phubot -telegram $TOKEN -allowed 123456789
+		# Telegram mode
+		./phubot -telegram $TOKEN -allowed 123456789
 
-Configuration:
+	 Configuration:
 
-	LM_STUDIO_URL - LM Studio server URL (default: http://127.0.0.1:1234/v1)
-	TELEGRAM_TOKEN - Telegram bot token (for Telegram mode)
-	ALLOWED_USERS - Comma-separated Telegram user IDs (optional)
+		config.json         - Main config file (run 'phubot -init' to create)
+		LM_STUDIO_API_KEY   - LLM API key (overrides config file)
+		LM_STUDIO_URL       - LLM server URL (overrides config file)
+		TELEGRAM_TOKEN      - Telegram bot token (overrides config file)
+		ALLOWED_USERS       - Comma-separated Telegram user IDs (overrides config file)
+
+		# CLI flags (override everything)
+		./phubot -config path/to/config.json
+		./phubot -telegram $TOKEN -allowed 123456789
 
 See README.md for complete documentation.
 */
@@ -58,6 +64,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chromedp/chromedp"
 	"github.com/pkoukk/tiktoken-go"
@@ -335,6 +342,9 @@ func (w *WAL) Append(msg openai.ChatCompletionMessage) error {
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("failed to write WAL entry: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("failed to sync WAL: %w", err)
+	}
 
 	w.trimIfTooLarge()
 	return nil
@@ -411,11 +421,17 @@ func (w *WAL) trimIfTooLarge() {
 		lineIdx++
 	}
 
-	if err := os.WriteFile(w.path, kept, 0644); err != nil {
-		log.Printf("[WAL] failed to trim: %v", err)
-	} else {
-		log.Printf("[WAL] trimmed from %d to %d lines", lines, lineIdx-keepFromLine)
+	tmpPath := w.path + ".trim"
+	if err := os.WriteFile(tmpPath, kept, 0644); err != nil {
+		log.Printf("[WAL] failed to write trimmed WAL: %v", err)
+		return
 	}
+	if err := os.Rename(tmpPath, w.path); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("[WAL] failed to rename trimmed WAL: %v", err)
+		return
+	}
+	log.Printf("[WAL] WARNING: trimmed WAL from %d to %d lines (in-memory history may diverge until next compaction)", lines, lineIdx-keepFromLine)
 }
 
 func (w *WAL) Rewrite(messages []openai.ChatCompletionMessage) error {
@@ -433,9 +449,21 @@ func (w *WAL) Rewrite(messages []openai.ChatCompletionMessage) error {
 	}
 
 	tmpPath := w.path + ".tmp"
-	if err := os.WriteFile(tmpPath, buf.Bytes(), 0644); err != nil {
+	tmpFile, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create temp WAL: %w", err)
+	}
+	if _, err := tmpFile.Write(buf.Bytes()); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("failed to write temp WAL: %w", err)
 	}
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to sync temp WAL: %w", err)
+	}
+	tmpFile.Close()
 
 	if err := os.Rename(tmpPath, w.path); err != nil {
 		os.Remove(tmpPath)
@@ -575,7 +603,7 @@ func (t *CDPBrowserFlightTool) Execute(args string) (string, error) {
 			window.chrome = {runtime: {}};
 		`, nil),
 		chromedp.Sleep(1*time.Second),
-		chromedp.Sleep(time.Duration(waitSecs-3)*time.Second),
+		chromedp.Sleep(time.Duration(max(waitSecs-3, 2))*time.Second),
 		chromedp.Evaluate(`
 			(() => {
 				const results = [];
@@ -667,12 +695,13 @@ func (m *Memory) Flush(ctx context.Context, client *openai.Client, model string,
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if time.Since(m.lastFlush) < m.minDelay {
+		m.mu.Unlock()
 		log.Printf("[Memory] Skipping flush - minimum delay not elapsed")
 		return nil
 	}
+	m.lastFlush = time.Now()
+	m.mu.Unlock()
 
 	if err := os.MkdirAll(m.baseDir, 0755); err != nil {
 		return fmt.Errorf("failed to create memory dir: %w", err)
@@ -722,7 +751,6 @@ func (m *Memory) Flush(ctx context.Context, client *openai.Client, model string,
 		return fmt.Errorf("failed to close dated memory file: %w", err)
 	}
 
-	m.lastFlush = time.Now()
 	return nil
 }
 
@@ -775,6 +803,12 @@ func (m *Memory) rotateMemory(filePath string) error {
 	}
 
 	log.Printf("[Memory] Rotated %s to archive/%s (size: %d bytes)", filePath, archiveName, len(data))
+
+	header := fmt.Sprintf("# Memory (rotated %s)\nSee archive/%s for full history.\n", time.Now().Format(time.RFC3339), archiveName)
+	if err := os.WriteFile(filePath, []byte(header), 0644); err != nil {
+		log.Printf("[Memory] Failed to truncate after rotation: %v", err)
+	}
+
 	return nil
 }
 
@@ -856,6 +890,9 @@ func countTokens(messages []openai.ChatCompletionMessage) int {
 		total := 0
 		for _, m := range messages {
 			total += len(m.Content)/4 + 4
+			for _, tc := range m.ToolCalls {
+				total += len(tc.Function.Name)/4 + len(tc.Function.Arguments)/4 + 4
+			}
 		}
 		return total
 	}
@@ -864,6 +901,11 @@ func countTokens(messages []openai.ChatCompletionMessage) int {
 	for _, m := range messages {
 		tokens := tke.Encode(m.Content, nil, nil)
 		total += len(tokens) + 4
+		for _, tc := range m.ToolCalls {
+			nameTokens := tke.Encode(tc.Function.Name, nil, nil)
+			argTokens := tke.Encode(tc.Function.Arguments, nil, nil)
+			total += len(nameTokens) + len(argTokens) + 4
+		}
 	}
 	return total
 }
@@ -1139,9 +1181,10 @@ func NewAgent(client *openai.Client, wal *WAL) *Agent {
 		} else if len(loaded) > 0 {
 			a.history = loaded
 			foundSystem := false
-			for _, m := range a.history {
+			for i, m := range a.history {
 				if m.Role == openai.ChatMessageRoleSystem {
 					foundSystem = true
+					a.history[i].Content = a.buildSystemPrompt()
 					break
 				}
 			}
@@ -1208,6 +1251,30 @@ func (a *Agent) SetToolTimeout(timeout time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.toolTimeout = timeout
+}
+
+func (a *Agent) setModel(model string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if model != "" {
+		a.model = model
+	}
+}
+
+func (a *Agent) setContextWindow(window int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if window > 0 {
+		a.contextWindow = window
+		a.reserveTokens = int(float64(window) * ReserveTokensRatio)
+		a.keepRecentTokens = int(float64(window) * KeepRecentTokensRatio)
+	}
+}
+
+func (a *Agent) setPruningConfig(pc PruningConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pruningConfig = pc
 }
 
 func (a *Agent) GetHistory() []openai.ChatCompletionMessage {
@@ -1324,7 +1391,7 @@ func (a *Agent) defaultSummarizer(ctx context.Context, prompt string, messages [
 
 	serialized := serializeMessages(messages)
 	req := openai.ChatCompletionRequest{
-		Model: "qwen3.5-9b-mlx",
+		Model: a.model,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: prompt},
 			{Role: openai.ChatMessageRoleUser, Content: serialized},
@@ -1361,39 +1428,46 @@ func (a *Agent) generateSummary(ctx context.Context, messages []openai.ChatCompl
 
 func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	if a.reserveTokens <= 0 || a.keepRecentTokens <= 0 {
+		a.mu.Unlock()
 		return nil
 	}
 
 	if len(a.history) < 4 {
+		a.mu.Unlock()
 		return nil
 	}
 
 	currentTokens := countTokens(a.history)
 
-	// NEW: Memory flush BEFORE compaction when approaching limit
-	// This gives the LLM time to write durable notes before context is lost
-	if currentTokens > a.reserveTokens-MemoryFlushThreshold && currentTokens < a.reserveTokens {
-		if a.memory != nil && a.client != nil {
-			log.Printf("[Compaction] Approaching limit (%d/%d tokens), flushing memory before compaction", currentTokens, a.reserveTokens)
-			if err := a.memory.Flush(ctx, a.client, a.model, a.history); err != nil {
-				log.Printf("[Compaction] Pre-compaction memory flush failed: %v", err)
-			} else {
-				newSysPrompt := a.buildSystemPrompt()
-				for i := range a.history {
-					if a.history[i].Role == openai.ChatMessageRoleSystem {
-						a.history[i].Content = newSysPrompt
-						break
-					}
-				}
-			}
-		}
+	needMemoryFlush := currentTokens > a.reserveTokens-MemoryFlushThreshold && currentTokens < a.reserveTokens && a.memory != nil && a.client != nil
+	needCompaction := currentTokens >= a.reserveTokens
+
+	if !needMemoryFlush && !needCompaction {
+		a.mu.Unlock()
+		return nil
 	}
 
-	// Check if compaction needed
-	if currentTokens < a.reserveTokens {
+	historySnapshot := make([]openai.ChatCompletionMessage, len(a.history))
+	copy(historySnapshot, a.history)
+	a.mu.Unlock()
+
+	if needMemoryFlush && !needCompaction {
+		log.Printf("[Compaction] Approaching limit (%d/%d tokens), flushing memory before compaction", currentTokens, a.reserveTokens)
+		if err := a.memory.Flush(ctx, a.client, a.model, historySnapshot); err != nil {
+			log.Printf("[Compaction] Pre-compaction memory flush failed: %v", err)
+		} else {
+			a.mu.Lock()
+			newSysPrompt := a.buildSystemPrompt()
+			for i := range a.history {
+				if a.history[i].Role == openai.ChatMessageRoleSystem {
+					a.history[i].Content = newSysPrompt
+					break
+				}
+			}
+			a.mu.Unlock()
+		}
 		return nil
 	}
 
@@ -1401,9 +1475,10 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 
 	systemPromptUpdated := false
 	if a.memory != nil && a.client != nil {
-		if err := a.memory.Flush(ctx, a.client, a.model, a.history); err != nil {
+		if err := a.memory.Flush(ctx, a.client, a.model, historySnapshot); err != nil {
 			log.Printf("[Compaction] Memory flush failed (continuing anyway): %v", err)
 		} else {
+			a.mu.Lock()
 			newSysPrompt := a.buildSystemPrompt()
 			for i := range a.history {
 				if a.history[i].Role == openai.ChatMessageRoleSystem {
@@ -1412,9 +1487,11 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 					break
 				}
 			}
+			a.mu.Unlock()
 		}
 	}
 
+	a.mu.Lock()
 	nonSystem := a.history[1:]
 	recentStart := findRecentStart(nonSystem, a.keepRecentTokens)
 
@@ -1425,10 +1502,14 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 				log.Printf("[Compaction] WAL rewrite for system prompt update failed: %v", err)
 			}
 		}
+		a.mu.Unlock()
 		return nil
 	}
 
-	oldMessages := nonSystem[:recentStart]
+	oldMessages := make([]openai.ChatCompletionMessage, recentStart)
+	copy(oldMessages, nonSystem[:recentStart])
+	a.mu.Unlock()
+
 	summary := a.generateSummary(ctx, oldMessages)
 
 	summaryMsg := openai.ChatCompletionMessage{
@@ -1436,10 +1517,17 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 		Content: fmt.Sprintf("[CONTEXT SUMMARY]: %s", summary),
 	}
 
+	a.mu.Lock()
 	var newHistory []openai.ChatCompletionMessage
 	newHistory = append(newHistory, a.history[0])
 	newHistory = append(newHistory, summaryMsg)
-	newHistory = append(newHistory, nonSystem[recentStart:]...)
+	nonSystem = a.history[1:]
+	recentStartNow := findRecentStart(nonSystem, a.keepRecentTokens)
+	if recentStartNow > 0 && recentStartNow < len(nonSystem) {
+		newHistory = append(newHistory, nonSystem[recentStartNow:]...)
+	} else if recentStartNow == 0 {
+		newHistory = append(newHistory, nonSystem...)
+	}
 
 	beforeCount := len(a.history)
 	a.history = newHistory
@@ -1451,6 +1539,7 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 	}
 
 	log.Printf("[Compaction] Reduced from %d to %d messages (%d tokens)", beforeCount, len(a.history), countTokens(a.history))
+	a.mu.Unlock()
 	return nil
 }
 
@@ -1514,13 +1603,19 @@ func (a *Agent) pruneToolResults(history []openai.ChatCompletionMessage) []opena
 			pruned[idx].Content = a.pruningConfig.HardClearPlaceholder
 			log.Printf("[Pruning] Hard-cleared tool result at index %d", idx)
 		} else {
-			// Soft trim: keep head + tail
 			content := pruned[idx].Content
 			if len(content) > a.pruningConfig.SoftTrimMaxChars {
-				head := content[:min(a.pruningConfig.SoftTrimHeadChars, len(content))]
+				headEnd := min(a.pruningConfig.SoftTrimHeadChars, len(content))
+				for headEnd > 0 && !utf8.RuneStart(content[headEnd]) {
+					headEnd--
+				}
+				head := content[:headEnd]
 				tail := ""
 				tailStart := len(content) - a.pruningConfig.SoftTrimTailChars
-				if tailStart > a.pruningConfig.SoftTrimHeadChars {
+				for tailStart > headEnd && !utf8.RuneStart(content[tailStart]) {
+					tailStart++
+				}
+				if tailStart > headEnd {
 					tail = content[tailStart:]
 				}
 				pruned[idx].Content = fmt.Sprintf("%s\n\n... [trimmed %d chars] ...\n\n%s",
@@ -1562,7 +1657,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 	for range 5 {
 		req := openai.ChatCompletionRequest{
-			Model:    "qwen3.5-9b-mlx",
+			Model:    a.model,
 			Messages: historyCopy,
 			Tools:    openAITools,
 		}
@@ -1598,7 +1693,14 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			a.mu.RUnlock()
 
 			if !exists {
-				return "", fmt.Errorf("LLM hallucinated a non-existent tool: %s", toolName)
+				toolMsg := openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					Content:    fmt.Sprintf("Error: tool %q does not exist. Use only the available tools.", toolName),
+					ToolCallID: toolCall.ID,
+				}
+				a.appendHistory(toolMsg)
+				historyCopy = append(historyCopy, toolMsg)
+				continue
 			}
 
 			if isLoop, hint := loopDetector.detectLoop(toolName, toolArgs); isLoop {
@@ -1646,6 +1748,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 					}
 				case <-time.After(timeout):
 					resultText = fmt.Sprintf("Error: tool %q timed out after %v", toolName, timeout)
+					go func() { <-resultCh }()
 				}
 			}
 
@@ -1660,6 +1763,8 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			a.appendHistory(toolMsg)
 			historyCopy = append(historyCopy, toolMsg)
 		}
+
+		historyCopy = a.pruneToolResults(historyCopy)
 	}
 
 	return "", fmt.Errorf("agent reached maximum thinking steps (circuit breaker triggered)")
@@ -1718,6 +1823,11 @@ func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 st
 				Role:    openai.ChatMessageRoleUser,
 				Content: prompt,
 			})
+			if a.wal != nil {
+				if rwErr := a.wal.Rewrite(a.history); rwErr != nil {
+					log.Printf("[Vision] WAL rewrite on fallback failed: %v", rwErr)
+				}
+			}
 			historyCopy = make([]openai.ChatCompletionMessage, len(a.history))
 			copy(historyCopy, a.history)
 			a.mu.Unlock()
@@ -1758,7 +1868,61 @@ func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 st
 		return cleanResponse(msg.Content), nil
 	}
 
-	return cleanResponse(msg.Content), nil
+	a.appendHistory(msg)
+
+	for _, toolCall := range msg.ToolCalls {
+		toolName := toolCall.Function.Name
+		toolArgs := toolCall.Function.Arguments
+
+		a.mu.RLock()
+		tool, exists := a.tools[toolName]
+		timeout := a.toolTimeout
+		a.mu.RUnlock()
+
+		var resultText string
+		if !exists {
+			resultText = fmt.Sprintf("Error: tool %q does not exist.", toolName)
+		} else {
+			if tc, ok := tool.(ToolWithContext); ok {
+				toolCtx, cancel := context.WithTimeout(ctx, timeout)
+				resultText, _ = tc.ExecuteWithContext(toolCtx, toolArgs)
+				cancel()
+			} else {
+				resultText, _ = tool.Execute(toolArgs)
+			}
+		}
+
+		toolMsg := openai.ChatCompletionMessage{
+			Role:       openai.ChatMessageRoleTool,
+			Content:    resultText,
+			Name:       toolName,
+			ToolCallID: toolCall.ID,
+		}
+		a.appendHistory(toolMsg)
+	}
+
+	a.mu.RLock()
+	historyCopy = make([]openai.ChatCompletionMessage, len(a.history))
+	copy(historyCopy, a.history)
+	a.mu.RUnlock()
+	historyCopy = a.pruneToolResults(historyCopy)
+
+	followUpReq := openai.ChatCompletionRequest{
+		Model:    a.model,
+		Messages: historyCopy,
+		Tools:    openAITools,
+	}
+	followUpResp, followUpErr := a.client.CreateChatCompletion(ctx, followUpReq)
+	if followUpErr != nil {
+		return cleanResponse(msg.Content), nil
+	}
+	if len(followUpResp.Choices) == 0 {
+		return cleanResponse(msg.Content), nil
+	}
+	followUpMsg := followUpResp.Choices[0].Message
+	followUpMsg.Content = cleanResponse(followUpMsg.Content)
+	a.appendHistory(followUpMsg)
+	return followUpMsg.Content, nil
 }
 
 // ==========================================
@@ -1933,10 +2097,20 @@ func (s *Scheduler) ParseDuration(input string) (time.Duration, error) {
 }
 
 func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	trunc := s[:maxLen]
+	for len(trunc) > 0 && !utf8.RuneStart(trunc[len(trunc)-1]) {
+		trunc = trunc[:len(trunc)-1]
+	}
+	if len(trunc) == 0 {
+		return ""
+	}
+	return trunc + "..."
 }
 
 func cleanResponse(content string) string {
@@ -2069,14 +2243,42 @@ func (t *SchedulerTool) Execute(args string) (string, error) {
 // ==========================================
 
 func main() {
-	telegramToken := flag.String("telegram", "", "Telegram bot token")
-	allowedUsers := flag.String("allowed", "", "Comma-separated list of allowed Telegram user IDs")
+	configPath := flag.String("config", "", "Path to config file (JSON)")
+	telegramToken := flag.String("telegram", "", "Telegram bot token (overrides config file)")
+	allowedUsers := flag.String("allowed", "", "Comma-separated Telegram user IDs (overrides config file)")
+	doInit := flag.Bool("init", false, "Create example config.json in current directory")
 	flag.Parse()
 
-	config := openai.DefaultConfig("sk-lm-tF4UHMAz:dhJpiJ5A6MvLrsEMJdU7")
-	config.BaseURL = "http://127.0.0.1:1234/v1"
+	if *doInit {
+		if err := writeExampleConfig("config.json"); err != nil {
+			log.Fatalf("Failed to create config.json: %v", err)
+		}
+		fmt.Println("Created config.json with example configuration. Edit it with your settings.")
+		return
+	}
 
-	client := openai.NewClientWithConfig(config)
+	cfg, loadedFrom, err := findAndLoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+	if loadedFrom != "" {
+		log.Printf("[Config] Loaded from %s", loadedFrom)
+	} else {
+		log.Printf("[Config] No config file found, using defaults")
+	}
+
+	apiKey := cfg.LLM.APIKey
+	if apiKey == "" {
+		apiKey = "sk-lm-tF4UHMAz:dhJpiJ5A6MvLrsEMJdU7"
+	}
+	llmConfig := openai.DefaultConfig(apiKey)
+	llmConfig.BaseURL = cfg.LLM.BaseURL
+
+	WALDir = cfg.WAL.Dir
+	WALFile = cfg.WAL.File
+	WALMaxSize = cfg.WAL.MaxSize
+
+	client := openai.NewClientWithConfig(llmConfig)
 
 	wal, err := OpenWAL()
 	if err != nil {
@@ -2084,6 +2286,11 @@ func main() {
 	}
 
 	agent := NewAgent(client, wal)
+	agent.setModel(cfg.LLM.Model)
+	agent.setContextWindow(cfg.Agent.ContextWindow)
+	agent.SetToolTimeout(cfg.Agent.ToolTimeout.ToDuration())
+	agent.setPruningConfig(cfg.PruningConfig())
+	agent.RegisterTool(&MomondoFlightTool{})
 	agent.RegisterTool(&CDPBrowserFlightTool{})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2092,9 +2299,19 @@ func main() {
 	scheduler := NewScheduler(agent, ctx)
 	agent.RegisterTool(&SchedulerTool{scheduler: scheduler})
 
-	if *telegramToken != "" {
-		userIDs := parseAllowedUsers(*allowedUsers)
-		bot, err := NewTelegramBot(*telegramToken, agent, scheduler, ctx, userIDs)
+	effectiveToken := *telegramToken
+	if effectiveToken == "" {
+		effectiveToken = cfg.Telegram.Token
+	}
+
+	if effectiveToken != "" {
+		var userIDs []int64
+		if *allowedUsers != "" {
+			userIDs = parseAllowedUsers(*allowedUsers)
+		} else {
+			userIDs = cfg.AllowedUserIDs()
+		}
+		bot, err := NewTelegramBot(effectiveToken, agent, scheduler, ctx, userIDs)
 		if err != nil {
 			log.Fatalf("Failed to create Telegram bot: %v", err)
 		}

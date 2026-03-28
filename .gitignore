@@ -29,6 +29,7 @@ go.work
 *.wal
 *.summary
 testdata/
+config.json
 
 # OS
 .DS_Store

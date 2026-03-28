@@ -1113,6 +1113,49 @@ func (s *Scheduler) runTask(task *ScheduledTask) {
 
 ---
 
+## Entry: Momondo Scraping POC Results (2026-03-28)
+
+### ADR: Momondo Scraping Strategy
+
+**Context**: Need to reliably scrape flight data from momondo.de for the `search_flights` tool.
+
+**POC Results** (`cmd/momondo-poc/main.go`):
+- **CSS selectors `div.c5NSH-card` all return 0 after React hydration** — SSR class names are replaced
+- **`div[class*="card--hidden"]` also returns 0** — hydration removes these
+- **XHR interception via prototype patching failed** — installed after page load, wiped on reload
+- **BUT: `document.body.innerText` contains ALL flight data in structured text**:
+  - Flight times: `14:35 – 20:55`, `19:10 – 21:40`
+  - Airlines: `Batik Air`, `AirAsia`, `Malaysia Airlines`, `Firefly`, `Thai Lion Air`
+  - Prices: `59 €`, `73 €`, `98 €`, `104 €`, `117 €`
+  - Duration: `1:30 Std.`, `5:20 Std.`
+  - Stops: `Nonstop`, `1 Stopp` (German UI)
+  - Routes: `Phuket International - Kuala Lumpur International`
+
+**Decision**: Parse `innerText` with regex instead of DOM selectors. This is:
+1. **Robust** — immune to CSS class name changes
+2. **Simple** — no selector maintenance
+3. **Complete** — all data present in text
+
+**Body text structure** (each flight is a block):
+```
+19:10 – 21:40                    # times
+Phuket International            # origin
+-                               # separator
+Kuala Lumpur International      # destination
+Nonstop                         # stops
+1:30 Std.                       # duration
+Batik Air                       # airline
+59 €                            # price
+/Person                         # per person
+Gesamt: 236 €                   # total
+```
+
+**Wait strategy**: The search takes ~10-15 seconds to fully load. The page shows a "Flugprognose" bar chart and price summary BEFORE individual results load. We need to wait until body text contains flight result patterns (price + time + airline).
+
+**Headless mode**: Works fine. No captcha observed.
+
+---
+
 **End of Development Log**
 
 *This document is a living record. Update it with every significant change.*

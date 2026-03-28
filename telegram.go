@@ -182,8 +182,8 @@ func (t *TelegramBot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	if strings.HasPrefix(text, "/cancel ") {
-		taskID := strings.TrimPrefix(text, "cancel ")
+	if after, ok := strings.CutPrefix(text, "/cancel "); ok {
+		taskID := after
 		if err := t.scheduler.Cancel(taskID); err != nil {
 			t.sendMessage(chatID, fmt.Sprintf("❌ Error: %v", err))
 		} else {

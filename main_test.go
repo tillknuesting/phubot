@@ -307,11 +307,20 @@ func TestChat_UnregisteredTool(t *testing.T) {
 	agent := NewAgent(client, nil)
 
 	_, err := agent.Chat(context.Background(), "use a fake tool")
+
 	if err == nil {
-		t.Fatal("expected error for unregistered tool")
+		t.Fatal("expected error (circuit breaker should trigger)")
 	}
-	if !strings.Contains(err.Error(), "non-existent tool") && !strings.Contains(err.Error(), "hallucinated") {
-		t.Fatalf("expected hallucinated tool error, got: %v", err)
+
+	found := false
+	for _, m := range agent.history {
+		if m.Role == openai.ChatMessageRoleTool && strings.Contains(m.Content, "does not exist") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected tool error message in history for non-existent tool")
 	}
 }
 
