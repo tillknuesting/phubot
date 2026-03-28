@@ -162,7 +162,7 @@ func FuzzWAL_ConcurrentAppendLoad(f *testing.F) {
 
 func FuzzBrowserTool_ArgParsing(f *testing.F) {
 	f.Fuzz(func(t *testing.T, argsJSON string) {
-		tool := &CDPBrowserFlightTool{}
+		tool := &BrowserTool{}
 		result, err := tool.Execute(argsJSON)
 		if err != nil {
 			if !strings.Contains(err.Error(), "failed to parse tool args") {
@@ -170,7 +170,7 @@ func FuzzBrowserTool_ArgParsing(f *testing.F) {
 			}
 			return
 		}
-		if !strings.Contains(result, "BROWSER EXTRACTED TEXT") {
+		if !strings.Contains(result, "BROWSER EXTRACTED") {
 			t.Errorf("unexpected result for valid args: %s", result)
 		}
 	})

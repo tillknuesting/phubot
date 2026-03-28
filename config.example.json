@@ -1,0 +1,27 @@
+{
+  "llm": {
+    "base_url": "http://127.0.0.1:1234/v1",
+    "api_key": "",
+    "model": "qwen3.5-9b-mlx"
+  },
+  "telegram": {
+    "token": "",
+    "allowed_users": ""
+  },
+  "agent": {
+    "context_window": 40000,
+    "tool_timeout": "30s",
+    "reserve_ratio": 0.70,
+    "keep_recent_ratio": 0.85,
+    "pruning_mode": "aggressive"
+  },
+  "memory": {
+    "max_size": 102400,
+    "flush_min_delay": "5s"
+  },
+  "wal": {
+    "dir": ".phubot",
+    "file": "history.wal",
+    "max_size": 5242880
+  }
+}

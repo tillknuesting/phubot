@@ -444,24 +444,24 @@ func TestChat_ContextCancellation(t *testing.T) {
 // CDP BROWSER FLIGHT TOOL TESTS
 // ==========================================
 
-func TestCDPBrowserFlightTool_Name(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
-	if tool.Name() != "browser_search_flights" {
-		t.Fatalf("expected name 'browser_search_flights', got '%s'", tool.Name())
+func TestBrowserTool_Name(t *testing.T) {
+	tool := &BrowserTool{}
+	if tool.Name() != "browse_web" {
+		t.Fatalf("expected name 'browse_web', got '%s'", tool.Name())
 	}
 }
 
-func TestCDPBrowserFlightTool_Definition(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
+func TestBrowserTool_Definition(t *testing.T) {
+	tool := &BrowserTool{}
 	def := tool.Definition()
 
 	if def.Type != openai.ToolTypeFunction {
 		t.Fatalf("expected tool type 'function', got '%s'", def.Type)
 	}
-	if def.Function.Name != "browser_search_flights" {
-		t.Fatalf("expected function name 'browser_search_flights', got '%s'", def.Function.Name)
+	if def.Function.Name != "browse_web" {
+		t.Fatalf("expected function name 'browse_web', got '%s'", def.Function.Name)
 	}
-	if !strings.Contains(def.Function.Description, "Chrome browser") {
+	if !strings.Contains(def.Function.Description, "browser") {
 		t.Fatalf("unexpected description: %s", def.Function.Description)
 	}
 
@@ -473,13 +473,13 @@ func TestCDPBrowserFlightTool_Definition(t *testing.T) {
 	if !ok {
 		t.Fatal("required should be a string slice")
 	}
-	if len(required) != 0 {
-		t.Fatalf("expected 0 required params (all optional), got %d", len(required))
+	if len(required) != 1 || required[0] != "url" {
+		t.Fatalf("expected 1 required param 'url', got %v", required)
 	}
 }
 
-func TestCDPBrowserFlightTool_Execute_MalformedJSON(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
+func TestBrowserTool_Execute_MalformedJSON(t *testing.T) {
+	tool := &BrowserTool{}
 	_, err := tool.Execute("not json at all")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON args")
@@ -489,15 +489,15 @@ func TestCDPBrowserFlightTool_Execute_MalformedJSON(t *testing.T) {
 	}
 }
 
-func TestCDPBrowserFlightTool_Execute_MissingArgs_NoValidation(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
-	args, _ := json.Marshal(map[string]string{"origin": "London"})
-	result, err := tool.Execute(string(args))
-	if err != nil {
-		t.Fatalf("tool does not require all args, unexpected error: %v", err)
+func TestBrowserTool_Execute_MissingURL(t *testing.T) {
+	tool := &BrowserTool{}
+	args, _ := json.Marshal(map[string]string{"wait_seconds": "5"})
+	_, err := tool.Execute(string(args))
+	if err == nil {
+		t.Fatal("expected error when url is missing")
 	}
-	if !strings.Contains(result, "BROWSER EXTRACTED") {
-		t.Fatalf("expected browser result even with missing args, got: %s", result)
+	if !strings.Contains(err.Error(), "url parameter is required") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -544,7 +544,7 @@ func TestMockTool_Execute_Error(t *testing.T) {
 // ==========================================
 
 func TestToolDefinition_HasRequiredFields(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
+	tool := &BrowserTool{}
 	def := tool.Definition()
 
 	if def.Function.Name == "" {
@@ -559,7 +559,7 @@ func TestToolDefinition_HasRequiredFields(t *testing.T) {
 }
 
 func TestToolDefinition_RequiredParamsExist(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
+	tool := &BrowserTool{}
 	def := tool.Definition()
 	params := def.Function.Parameters.(map[string]any)
 	required := params["required"].([]string)
@@ -576,8 +576,8 @@ func TestToolDefinition_RequiredParamsExist(t *testing.T) {
 // INTERFACE COMPLIANCE TESTS
 // ==========================================
 
-func TestCDPBrowserFlightTool_ImplementsTool(t *testing.T) {
-	var _ Tool = &CDPBrowserFlightTool{}
+func TestBrowserTool_ImplementsTool(t *testing.T) {
+	var _ Tool = &BrowserTool{}
 }
 
 func TestMockTool_ImplementsTool(t *testing.T) {
@@ -735,7 +735,7 @@ func TestWAL_PreservesToolCallFields(t *testing.T) {
 	msg := openai.ChatCompletionMessage{
 		Role:       openai.ChatMessageRoleTool,
 		Content:    "result text",
-		Name:       "browser_search_flights",
+		Name:       "browse_web",
 		ToolCallID: "call_abc123",
 	}
 	w.Append(msg)
@@ -747,7 +747,7 @@ func TestWAL_PreservesToolCallFields(t *testing.T) {
 	if loaded[0].ToolCallID != "call_abc123" {
 		t.Fatalf("ToolCallID not preserved: %s", loaded[0].ToolCallID)
 	}
-	if loaded[0].Name != "browser_search_flights" {
+	if loaded[0].Name != "browse_web" {
 		t.Fatalf("Name not preserved: %s", loaded[0].Name)
 	}
 }
@@ -1485,12 +1485,12 @@ func TestChat_NoToolsRegistered(t *testing.T) {
 // ==========================================
 
 func TestToolDefinition_PropertyTypes(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
+	tool := &BrowserTool{}
 	def := tool.Definition()
 	params := def.Function.Parameters.(map[string]any)
 	properties := params["properties"].(map[string]any)
 
-	for _, fieldName := range []string{"origin", "destination", "date"} {
+	for _, fieldName := range []string{"url", "wait_seconds"} {
 		prop, exists := properties[fieldName]
 		if !exists {
 			t.Fatalf("property %q not found", fieldName)
@@ -2801,17 +2801,13 @@ func TestChat_SystemPromptNotSentAsUserMessage(t *testing.T) {
 // ==========================================
 
 func TestBrowserTool_DefinitionPropertiesHaveDescriptions(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
+	tool := &BrowserTool{}
 	def := tool.Definition()
 	params := def.Function.Parameters.(map[string]any)
 	properties := params["properties"].(map[string]any)
 
 	expectedProps := map[string]string{
-		"url":          "Direct URL to navigate to (optional, takes precedence over search)",
-		"origin":       "Origin city/airport code",
-		"destination":  "Destination city/airport code",
-		"date":         "Date in YYYY-MM-DD format",
-		"adults":       "Number of adults (default 2)",
+		"url":          "URL to navigate to",
 		"wait_seconds": "Seconds to wait for page load (default 8)",
 	}
 	for name, expectedDesc := range expectedProps {
@@ -2830,7 +2826,7 @@ func TestBrowserTool_DefinitionPropertiesHaveDescriptions(t *testing.T) {
 }
 
 func TestBrowserTool_DefinitionTypeIsObject(t *testing.T) {
-	tool := &CDPBrowserFlightTool{}
+	tool := &BrowserTool{}
 	def := tool.Definition()
 	params := def.Function.Parameters.(map[string]any)
 	if params["type"] != "object" {

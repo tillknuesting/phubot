@@ -56,7 +56,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -477,36 +476,37 @@ func (w *WAL) Rewrite(messages []openai.ChatCompletionMessage) error {
 // BROWSER ENGINE (CDP)
 // ==========================================
 
-type CDPBrowserFlightTool struct{}
+type BrowserTool struct{}
 
-func (t *CDPBrowserFlightTool) Name() string { return "browser_search_flights" }
+func (t *BrowserTool) Name() string { return "browse_web" }
 
-func (t *CDPBrowserFlightTool) Definition() openai.Tool {
+func (t *BrowserTool) Definition() openai.Tool {
 	return openai.Tool{
 		Type: openai.ToolTypeFunction,
 		Function: &openai.FunctionDefinition{
 			Name:        t.Name(),
-			Description: "Opens a Chrome browser via CDP to search for live flight prices. Can use direct URL or search via Bing.",
+			Description: "Opens a Chrome browser to navigate to any URL and extract the page text content. Useful for browsing the web.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"url":          map[string]any{"type": "string", "description": "Direct URL to navigate to (optional, takes precedence over search)"},
-					"origin":       map[string]any{"type": "string", "description": "Origin city/airport code"},
-					"destination":  map[string]any{"type": "string", "description": "Destination city/airport code"},
-					"date":         map[string]any{"type": "string", "description": "Date in YYYY-MM-DD format"},
-					"adults":       map[string]any{"type": "string", "description": "Number of adults (default 2)"},
+					"url":          map[string]any{"type": "string", "description": "URL to navigate to"},
 					"wait_seconds": map[string]any{"type": "string", "description": "Seconds to wait for page load (default 8)"},
 				},
-				"required": []string{},
+				"required": []string{"url"},
 			},
 		},
 	}
 }
 
-func (t *CDPBrowserFlightTool) Execute(args string) (string, error) {
+func (t *BrowserTool) Execute(args string) (string, error) {
 	var parsedArgs map[string]string
 	if err := json.Unmarshal([]byte(args), &parsedArgs); err != nil {
 		return "", fmt.Errorf("failed to parse tool args: %v", err)
+	}
+
+	targetURL := parsedArgs["url"]
+	if targetURL == "" {
+		return "", fmt.Errorf("url parameter is required")
 	}
 
 	waitSecs := 8
@@ -516,42 +516,7 @@ func (t *CDPBrowserFlightTool) Execute(args string) (string, error) {
 		}
 	}
 
-	var targetURL string
-	if directURL, ok := parsedArgs["url"]; ok && directURL != "" {
-		targetURL = directURL
-		log.Printf("[Browser] Using direct URL: %s", targetURL)
-	} else {
-		origin := parsedArgs["origin"]
-		dest := parsedArgs["destination"]
-		date := parsedArgs["date"]
-		adults := parsedArgs["adults"]
-		if adults == "" {
-			adults = "2"
-		}
-
-		if origin != "" && dest != "" && date != "" {
-			targetURL = fmt.Sprintf(
-				"https://www.momondo.de/flight-search/%s-%s/%s/%sadults?sort=price_a",
-				origin, dest, date, adults,
-			)
-			log.Printf("[Browser] Constructed Momondo URL: %s", targetURL)
-		} else {
-			query := "flight prices"
-			if origin != "" {
-				query = fmt.Sprintf("flights from %s", origin)
-			}
-			if dest != "" {
-				query = fmt.Sprintf("%s to %s", query, dest)
-			}
-			if date != "" {
-				query = fmt.Sprintf("%s on %s", query, date)
-			}
-			targetURL = "https://www.bing.com/search?q=" + url.QueryEscape(query)
-			log.Printf("[Browser] Using Bing search: %s", targetURL)
-		}
-	}
-
-	log.Printf("[Browser] Launching Chrome with anti-detection...")
+	log.Printf("[Browser] Navigating to URL: %s", targetURL)
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false),
@@ -591,7 +556,7 @@ func (t *CDPBrowserFlightTool) Execute(args string) (string, error) {
 	ctx, cancelTimeout := context.WithTimeout(ctx, timeout)
 	defer cancelTimeout()
 
-	var flightData string
+	var pageText string
 
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(targetURL),
@@ -604,53 +569,20 @@ func (t *CDPBrowserFlightTool) Execute(args string) (string, error) {
 		`, nil),
 		chromedp.Sleep(1*time.Second),
 		chromedp.Sleep(time.Duration(max(waitSecs-3, 2))*time.Second),
-		chromedp.Evaluate(`
-			(() => {
-				const results = [];
-				
-				const flightCards = document.querySelectorAll('[class*="resultInner"], [class*="flight-card"], [class*="FlightResult"], [class*="ResultEntry"], [data-result-id]');
-				
-				if (flightCards.length > 0) {
-					flightCards.forEach((card, i) => {
-						const text = card.innerText || card.textContent;
-						if (text && text.trim()) {
-							results.push('Flight ' + (i+1) + ':\n' + text.trim().substring(0, 500));
-						}
-					});
-					if (results.length > 0) return 'FLIGHTS FOUND:\n\n' + results.slice(0, 10).join('\n\n');
-				}
-				
-				const priceElements = document.querySelectorAll('[class*="price"], [class*="Price"]');
-				if (priceElements.length > 0) {
-					priceElements.forEach((el, i) => {
-						const text = el.innerText || el.textContent;
-						if (text && (text.includes('€') || text.includes('$') || text.includes('£'))) {
-							results.push(text.trim().substring(0, 200));
-						}
-					});
-					if (results.length > 0) return 'PRICES FOUND:\n' + results.slice(0, 15).join('\n');
-				}
-				
-				return document.body.innerText.substring(0, 6000);
-			})()
-		`, &flightData),
+		chromedp.Evaluate(`document.body.innerText.substring(0, 6000)`, &pageText),
 	)
 
 	if err != nil {
 		return "", fmt.Errorf("browser execution failed: %v", err)
 	}
 
-	if flightData == "" {
-		chromedp.Run(ctx, chromedp.Evaluate(`document.body.innerText.substring(0, 4000)`, &flightData))
+	if len(pageText) > 6000 {
+		pageText = pageText[:6000]
 	}
 
-	if len(flightData) > 6000 {
-		flightData = flightData[:6000]
-	}
+	log.Printf("[Browser] Page scraped successfully (%d chars)", len(pageText))
 
-	log.Printf("[Browser] Page scraped successfully (%d chars)", len(flightData))
-
-	return "BROWSER EXTRACTED:\n" + flightData, nil
+	return "BROWSER EXTRACTED:\n" + pageText, nil
 }
 
 // ==========================================
@@ -2289,7 +2221,7 @@ func main() {
 	agent.SetToolTimeout(cfg.Agent.ToolTimeout.ToDuration())
 	agent.setPruningConfig(cfg.PruningConfig())
 	agent.RegisterTool(&MomondoFlightTool{})
-	agent.RegisterTool(&CDPBrowserFlightTool{})
+	agent.RegisterTool(&BrowserTool{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

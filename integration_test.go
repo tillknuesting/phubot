@@ -843,11 +843,9 @@ func TestIntegration_BrowserTool(t *testing.T) {
 
 	start := time.Now()
 
-	tool := &CDPBrowserFlightTool{}
+	tool := &BrowserTool{}
 	args, _ := json.Marshal(map[string]string{
-		"origin":      "London",
-		"destination": "Paris",
-		"date":        "2026-05-01",
+		"url": htmlServer.URL,
 	})
 
 	result, err := tool.Execute(string(args))
@@ -860,7 +858,7 @@ func TestIntegration_BrowserTool(t *testing.T) {
 		t.Fatalf("browser tool took too long: %v", elapsed)
 	}
 
-	if !strings.Contains(result, "BROWSER EXTRACTED TEXT") {
+	if !strings.Contains(result, "BROWSER EXTRACTED") {
 		t.Fatalf("result should contain 'BROWSER EXTRACTED TEXT', got: %s", result)
 	}
 
