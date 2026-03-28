@@ -72,7 +72,7 @@ import (
 )
 
 // ==========================================
-// OPENCLAW CONCEPT 1: THE SKILL / TOOL REGISTRY
+// TOOL REGISTRY
 // ==========================================
 
 // Tool defines the interface for pluggable capabilities.
@@ -137,12 +137,12 @@ var (
 const (
 	// DefaultContextWindow is the default context window size in tokens.
 	// This should match or be less than your model's actual context window.
-	// Default: 40000 tokens (suitable for most modern models, lower than OpenClaw's 200K)
+	// Default: 40000 tokens (suitable for most modern models)
 	DefaultContextWindow = 40000
 
 	// ReserveTokensRatio is the ratio of context window that triggers compaction.
 	// When tokens exceed (ContextWindow * ReserveTokensRatio), compaction starts.
-	// Default: 0.70 (70% of context window, more aggressive than OpenClaw's 0.75)
+	// Default: 0.70 (70% of context window)
 	ReserveTokensRatio = 0.70
 
 	// KeepRecentTokensRatio is the ratio of context window reserved for recent messages.
@@ -184,7 +184,7 @@ const (
 	MemoryFlushPrompt = "Extract all important facts, state, and context from this conversation that should be remembered long-term. Format as bullet points. Include names, numbers, decisions, and any information that would be important to know if the conversation were summarized."
 )
 
-// Tool result pruning configuration (Tier 1 - OpenClaw style)
+// Tool result pruning configuration (Tier 1)
 type PruningConfig struct {
 	Mode                 string  // "off", "conservative", "aggressive"
 	SoftTrimRatio        float64 // Trim when this ratio of context is tool results (0.25 = 25%)
@@ -197,12 +197,12 @@ type PruningConfig struct {
 
 // Default pruning configuration
 var DefaultPruningConfig = PruningConfig{
-	Mode:                 "aggressive", // More aggressive than OpenClaw
-	SoftTrimRatio:        0.20,         // Trim when 20% of context is tool results
-	HardClearRatio:       0.35,         // Clear when 35% is tool results
-	SoftTrimMaxChars:     3000,         // Keep max 3000 chars in trimmed results
-	SoftTrimHeadChars:    1000,         // Keep first 1000 chars
-	SoftTrimTailChars:    1000,         // Keep last 1000 chars
+	Mode:                 "aggressive",
+	SoftTrimRatio:        0.20, // Trim when 20% of context is tool results
+	HardClearRatio:       0.35, // Clear when 35% is tool results
+	SoftTrimMaxChars:     3000, // Keep max 3000 chars in trimmed results
+	SoftTrimHeadChars:    1000, // Keep first 1000 chars
+	SoftTrimTailChars:    1000, // Keep last 1000 chars
 	HardClearPlaceholder: "[Previous tool result cleared to save context]",
 }
 
@@ -474,7 +474,7 @@ func (w *WAL) Rewrite(messages []openai.ChatCompletionMessage) error {
 }
 
 // ==========================================
-// OPENCLAW CONCEPT 2: REAL-WORLD ACTUATION (CDP BROWSER)
+// BROWSER ENGINE (CDP)
 // ==========================================
 
 type CDPBrowserFlightTool struct{}
@@ -654,9 +654,7 @@ func (t *CDPBrowserFlightTool) Execute(args string) (string, error) {
 }
 
 // ==========================================
-// OPENCLAW CONCEPT 6: MEMORY (Durable State)
-// ==========================================
-// OPENCLAW CONCEPT 6: MEMORY (Durable State)
+// MEMORY (Durable State)
 // ==========================================
 
 type Memory struct {
@@ -947,7 +945,7 @@ func findRecentStart(messages []openai.ChatCompletionMessage, budget int) int {
 }
 
 // ==========================================
-// OPENCLAW CONCEPT 3: PERSISTENT STATE & MEMORY
+// PERSISTENT STATE & MEMORY
 // ==========================================
 
 // SummarizeFunc is a pluggable function type for custom summarization strategies.
@@ -1158,7 +1156,7 @@ func NewAgent(client *openai.Client, wal *WAL) *Agent {
 		contextWindow:    contextWindow,
 		reserveTokens:    reserveTokens,
 		keepRecentTokens: keepRecentTokens,
-		baseSystemPrompt: "You are an autonomous OpenClaw-style personal assistant. You have access to a web browser tool. Always use it if the user asks for real-time data like flight prices. Extract the data cleanly.",
+		baseSystemPrompt: "You are an autonomous personal assistant. You have access to a web browser tool. Always use it if the user asks for real-time data like flight prices. Extract the data cleanly.",
 		toolTimeout:      DefaultToolTimeout,
 		loopDetector:     NewLoopDetector(),
 		pruningConfig:    DefaultPruningConfig,
@@ -1381,7 +1379,7 @@ func (a *Agent) updateSystemPromptInWAL() {
 }
 
 // ==========================================
-// OPENCLAW CONCEPT 7: CONTEXT COMPACTION
+// CONTEXT COMPACTION
 // ==========================================
 
 func (a *Agent) defaultSummarizer(ctx context.Context, prompt string, messages []openai.ChatCompletionMessage) (string, error) {
@@ -1544,7 +1542,7 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 }
 
 // ==========================================
-// TOOL RESULT PRUNING (Tier 1 - OpenClaw Style)
+// TOOL RESULT PRUNING (Tier 1)
 // ==========================================
 
 // pruneToolResults trims oversized tool results before sending to LLM.
@@ -1630,7 +1628,7 @@ func (a *Agent) pruneToolResults(history []openai.ChatCompletionMessage) []opena
 }
 
 // ==========================================
-// OPENCLAW CONCEPT 4: THE ReAct (Reason + Act) ENGINE
+// THE ReAct (Reason + Act) ENGINE
 // ==========================================
 
 func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
@@ -1926,7 +1924,7 @@ func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 st
 }
 
 // ==========================================
-// OPENCLAW CONCEPT 8: SCHEDULER (Periodic Tasks)
+// SCHEDULER (Periodic Tasks)
 // ==========================================
 
 type ScheduledTask struct {
@@ -2239,7 +2237,7 @@ func (t *SchedulerTool) Execute(args string) (string, error) {
 }
 
 // ==========================================
-// OPENCLAW CONCEPT 5: THE GATEWAY (I/O BOUNDARY)
+// THE GATEWAY (I/O BOUNDARY)
 // ==========================================
 
 func main() {

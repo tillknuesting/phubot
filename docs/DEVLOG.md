@@ -26,8 +26,8 @@
 **Goal**: Build a persistent, autonomous personal AI agent in Go that can browse the web, maintain conversation history, and execute tasks autonomously.
 
 **Inspiration Sources**:
-- OpenClaw architecture (modular tool system)
-- Nous Research's Hermes Agent (ReAct loop pattern)
+- Modular tool system
+- ReAct loop pattern
 - Local LLM capabilities (LM Studio)
 
 **Why Go?**

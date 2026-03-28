@@ -1,4 +1,4 @@
-# System Specification: OpenClaw-Style Autonomous Go Agent
+# System Specification: Phubot Autonomous Go Agent
 
 **Status**: ✅ **FULLY IMPLEMENTED** (2026-03-28)  
 **Version**: 1.0.0  
@@ -8,7 +8,7 @@
 
 ## 1. System Objective
 
-Build a persistent, autonomous personal AI agent in Go. The architecture is inspired by **OpenClaw** and **Nous Research's Hermes Agent**. The agent must operate a **ReAct (Reason + Act) loop**, maintain conversational memory, and actuate in the real world using a dynamic Tool Registry.
+Build a persistent, autonomous personal AI agent in Go. The agent must operate a **ReAct (Reason + Act) loop**, maintain conversational memory, and actuate in the real world using a dynamic Tool Registry.
 
 The primary initial capability is real web browsing via the **Chrome DevTools Protocol (CDP)** to navigate dynamic flight-booking websites, extract live prices, and perform actions.
 

@@ -1,8 +1,7 @@
 # Context Management System
 
 **Status**: ✅ Implemented (2026-03-28)  
-**Inspired by**: OpenClaw's 3-tier context management  
-**Configuration**: 40K context window (more aggressive than OpenClaw's 200K)
+**Configuration**: 40K context window
 
 ---
 
@@ -24,7 +23,7 @@ Phubot now implements a sophisticated **3-tier context management system** to ha
 - **Tier 2**: Compacts with memory flush before losing context
 - **Tier 3**: Session management commands for user control
 - **Dynamic thresholds**: Adapts to any context window size
-- **40K default**: More aggressive than OpenClaw's 200K
+- **40K default**: Tuned for local models
 
 ---
 
@@ -32,8 +31,7 @@ Phubot now implements a sophisticated **3-tier context management system** to ha
 
 **What**: Trims oversized tool results before sending to LLM  
 **When**: Before every LLM request (in-memory only)  
-**Storage**: Does NOT modify on-disk WAL  
-**Inspired by**: OpenClaw's `contextPruning` feature
+**Storage**: Does NOT modify on-disk WAL
 
 ### Configuration
 
@@ -101,14 +99,13 @@ Economy Class
 
 **What**: Summarizes old messages + flushes memory before compaction  
 **When**: When tokens exceed **70% of context window**  
-**Storage**: Persists to WAL (on-disk)  
-**Inspired by**: OpenClaw's `compaction` feature
+**Storage**: Persists to WAL (on-disk)
 
 ### Configuration
 
 ```go
 const (
-    DefaultContextWindow     = 40000  // 40K tokens (vs OpenClaw's 200K)
+    DefaultContextWindow     = 40000  // 40K tokens
     ReserveTokensRatio       = 0.70   // Trigger at 70% (28K tokens)
     KeepRecentTokensRatio    = 0.85   // Keep 85% recent (34K tokens)
     MemoryFlushThreshold     = 4000   // Flush 4K before limit
@@ -117,7 +114,7 @@ const (
 
 ### How It Works
 
-**Before** (OpenClaw-style):
+**Before**:
 ```
 1. Check tokens > reserve
 2. If yes: summarize old messages
@@ -209,20 +206,19 @@ You: /stats
 
 ## Configuration Comparison
 
-### OpenClaw vs Phubot
+### Configuration Comparison
 
-| Feature | OpenClaw | Phubot | Rationale |
-|---------|----------|--------|-----------|
-| **Context Window** | 200K | 40K | Lower default, more accessible |
-| **Reserve Ratio** | 75% | 70% | More aggressive compaction |
-| **Keep Recent Ratio** | 90% | 85% | Remember less, smaller context |
-| **Pruning Aggressiveness** | Conservative | Aggressive | 20% vs 30% soft trim |
-| **Memory Flush** | Before compact | Before + during | Double protection |
+| Feature | Value | Rationale |
+|---------|-------|-----------|
+| **Context Window** | 40K | Lower default, more accessible |
+| **Reserve Ratio** | 70% | Aggressive compaction |
+| **Keep Recent Ratio** | 85% | Remember less, smaller context |
+| **Pruning Aggressiveness** | Aggressive | 20% soft trim |
+| **Memory Flush** | Before + during | Double protection |
 
-### Why More Aggressive?
+### Why These Defaults?
 
-**OpenClaw**: Designed for 200K context windows (Claude, GPT-4)
-**Phubot**: Optimized for 40K windows (local models)
+Optimized for 40K windows (local models).
 
 **Trade-offs**:
 - ✅ Fits in smaller context windows
@@ -336,11 +332,11 @@ User Message
 
 ### Compaction Frequency
 
-| Context Window | OpenClaw (200K) | Phubot (40K) | Difference |
-|----------------|-----------------|--------------|------------|
-| Avg messages before compact | ~150 | ~30 | 5x more frequent |
-| Compaction time | ~2-3s | ~0.5-1s | 3x faster |
-| Memory usage | ~50MB | ~10MB | 5x less |
+| Context Window | Phubot (40K) |
+|----------------|--------------|
+| Avg messages before compact | ~30 |
+| Compaction time | ~0.5-1s |
+| Memory usage | ~10MB |
 
 ---
 
@@ -450,7 +446,7 @@ You: /stats
    - `aggressive`: 20% soft trim, 35% hard clear (current)
    - `extreme`: 15% soft trim, 25% hard clear
 
-2. **Session scoping** (like OpenClaw)
+2. **Session scoping**
    - `per-peer`: Each user gets own session
    - `per-channel-peer`: Isolate by channel + user
 
@@ -466,8 +462,6 @@ You: /stats
 
 ## References
 
-- **OpenClaw Documentation**: https://docs.openclaw.ai/concepts/session-pruning
-- **OpenClaw Compaction**: https://docs.openclaw.ai/concepts/compaction
 - **Implementation**: main.go:1060-1210 (pruning), main.go:1295-1370 (compaction)
 - **Configuration**: main.go:110-210
 

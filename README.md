@@ -10,18 +10,6 @@ A local AI agent in Go. Talks to LM Studio, browses the web, remembers conversat
 - **Telegram bot** — full gateway with vision support, user auth, and message splitting
 - **Task scheduler** — "check prices every 2 hours" actually works
 
-## Stack
-
-| What | Which |
-|---|---|
-| Language | Go 1.26 |
-| LLM | LM Studio (`localhost:1234`) |
-| Browser | chromedp (CDP) |
-| Telegram | telegram-bot-api/v5 |
-| Tokenizer | tiktoken-go |
-
-Works best with tool-calling models: Qwen3.5-9B-MLX, Hermes-2-Pro, Qwen-2.5-Coder.
-
 ## Setup
 
 You need Go 1.26+, LM Studio with a tool-calling model loaded on port 1234, and Chrome/Chromium for browser tools.
