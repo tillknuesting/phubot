@@ -172,6 +172,7 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 
 		if hasPrices && i >= 3 {
 			scrollAndWait(timeoutCtx)
+			scrollAndWait(timeoutCtx)
 			chromedp.Run(timeoutCtx, chromedp.Evaluate(`document.body.innerText`, &bodyText))
 			break
 		}
@@ -285,11 +286,11 @@ func buildMomondoURL(origin, dest, date, returnDate string, adults int, children
 func scrollAndWait(ctx context.Context) {
 	chromedp.Run(ctx,
 		chromedp.Evaluate(`
-			for (let i = 0; i < 5; i++) {
-				setTimeout(() => window.scrollBy(0, 800), i * 600);
+			for (let i = 0; i < 30; i++) {
+				setTimeout(() => window.scrollBy(0, 800), i * 400);
 			}
 		`, nil),
-		chromedp.Sleep(4*time.Second),
+		chromedp.Sleep(6*time.Second),
 	)
 }
 
