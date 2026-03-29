@@ -114,6 +114,8 @@ func (t *TelegramBot) handleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
 	text := strings.TrimSpace(msg.Text)
 
+	text = stripBotSuffix(text)
+
 	if msg.Photo != nil && len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
 		log.Printf("[Telegram] [%s] Photo received: %dx%d, FileID: %s", msg.From.UserName, photo.Width, photo.Height, photo.FileID)
@@ -377,4 +379,16 @@ func parseAllowedUsers(env string) []int64 {
 		}
 	}
 	return ids
+}
+
+func stripBotSuffix(text string) string {
+	if idx := strings.Index(text, "@"); idx > 0 && (strings.HasPrefix(text, "/")) {
+		cmd := text[:idx]
+		rest := text[idx:]
+		if botEnd := strings.Index(rest, " "); botEnd > 0 {
+			return cmd + rest[botEnd:]
+		}
+		return cmd
+	}
+	return text
 }

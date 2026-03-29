@@ -120,9 +120,9 @@ var defaultConfig = Config{
 		},
 		{
 			Name:    "glm5-turbo",
-			BaseURL: "https://open.bigmodel.cn/api/paas/v4",
+			BaseURL: "https://api.z.ai/api/coding/paas/v4",
 			APIKey:  "",
-			Model:   "zai-coding-plan/glm-5.1",
+			Model:   "glm-5",
 		},
 	},
 }

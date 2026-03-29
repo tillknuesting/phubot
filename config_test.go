@@ -399,10 +399,10 @@ func TestConfig_DefaultModels(t *testing.T) {
 	if cfg.Models[1].Name != "glm5-turbo" {
 		t.Errorf("expected second model 'glm5-turbo', got %q", cfg.Models[1].Name)
 	}
-	if cfg.Models[1].BaseURL != "https://open.bigmodel.cn/api/paas/v4" {
+	if cfg.Models[1].BaseURL != "https://api.z.ai/api/coding/paas/v4" {
 		t.Errorf("expected glm5 base URL, got %q", cfg.Models[1].BaseURL)
 	}
-	if cfg.Models[1].Model != "zai-coding-plan/glm-5.1" {
+	if cfg.Models[1].Model != "glm-5" {
 		t.Errorf("expected glm5 model ID, got %q", cfg.Models[1].Model)
 	}
 }
