@@ -387,3 +387,54 @@ func TestConfig_DurationParsing(t *testing.T) {
 		t.Errorf("expected 10s, got %v", cfg.Memory.FlushMinDelay)
 	}
 }
+
+func TestConfig_DefaultModels(t *testing.T) {
+	cfg := defaultConfig
+	if len(cfg.Models) != 2 {
+		t.Fatalf("expected 2 default models, got %d", len(cfg.Models))
+	}
+	if cfg.Models[0].Name != "local" {
+		t.Errorf("expected first model 'local', got %q", cfg.Models[0].Name)
+	}
+	if cfg.Models[1].Name != "glm5-turbo" {
+		t.Errorf("expected second model 'glm5-turbo', got %q", cfg.Models[1].Name)
+	}
+	if cfg.Models[1].BaseURL != "https://open.bigmodel.cn/api/paas/v4" {
+		t.Errorf("expected glm5 base URL, got %q", cfg.Models[1].BaseURL)
+	}
+	if cfg.Models[1].Model != "zai-coding-plan/glm-5.1" {
+		t.Errorf("expected glm5 model ID, got %q", cfg.Models[1].Model)
+	}
+}
+
+func TestConfig_ModelsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	content := `{
+		"models": [
+			{"name": "custom", "base_url": "http://myhost/v1", "api_key": "k1", "model": "m1"},
+			{"name": "other", "base_url": "http://other/v1", "api_key": "k2", "model": "m2"}
+		]
+	}`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.Models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(cfg.Models))
+	}
+	if cfg.Models[0].Name != "custom" {
+		t.Errorf("expected 'custom', got %q", cfg.Models[0].Name)
+	}
+	if cfg.Models[0].Model != "m1" {
+		t.Errorf("expected model 'm1', got %q", cfg.Models[0].Model)
+	}
+	if cfg.Models[1].Name != "other" {
+		t.Errorf("expected 'other', got %q", cfg.Models[1].Name)
+	}
+}

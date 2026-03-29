@@ -1,7 +1,7 @@
 # System Specification: Phubot Autonomous Go Agent
 
-**Status**: ✅ **FULLY IMPLEMENTED** (2026-03-28)  
-**Version**: 1.0.0  
+**Status**: ✅ **FULLY IMPLEMENTED** (2026-03-29)  
+**Version**: 1.1.0  
 **Implementation Deviations**: See Section 7
 
 ---
@@ -67,8 +67,9 @@ type ToolWithContext interface {
 **Constraint Met**: ✅ Tool failures do NOT crash the program. Errors are returned to LLM for reasoning.
 
 **Implemented Tools**:
-1. ✅ `browser_search_flights` - CDP-based flight search
-2. ✅ `schedule_task` - Periodic task execution
+1. ✅ `search_flights` - Momondo flight scraper with structured parsing (`momondo.go`)
+2. ✅ `browse_web` - Generic web browser for any URL (`main.go`)
+3. ✅ `schedule_task` - Periodic task execution
 
 ---
 
@@ -85,6 +86,9 @@ The Gateway handles user input and output. The system must support multiple gate
 - Long message splitting (4000 char chunks)
 - User authentication (whitelist)
 - Streaming "typing" indicator
+- Multi-model switching via `/model` command
+- Message deduplication (5-second window)
+- Live progress updates during tool execution (rate-limited to 1 update/2s)
 
 **Initial Implementation**: ✅ Standard CLI completed.
 
@@ -217,23 +221,26 @@ return errors.New("circuit breaker: max iterations")
 **Status**: ✅ All tasks completed
 
 1. ✅ Install `github.com/chromedp/chromedp`
-2. ✅ Create `browser_tool.go` (merged into `main.go`)
-3. ✅ Name: `browser_search_flights`
-4. ✅ Schema Parameters: `origin`, `destination`, `date`, `adults`, `url`, `wait_seconds`
+2. ✅ Generic `browse_web` tool for any URL (`main.go`)
+3. ✅ Dedicated `search_flights` tool with Momondo SPA scraper (`momondo.go`)
+4. ✅ Schema Parameters:
+   - `browse_web`: `url`, `wait_seconds`
+   - `search_flights`: `origin`, `destination`, `date`, `return_date`, `adults`
 5. ✅ Implementation details:
-   - Parse JSON args ✅
-   - Construct URL (Momondo, Google, or direct) ✅
-   - Launch `chromedp` context with 15-second timeout ✅
-   - Navigate, wait, extract `innerText` ✅
-   - Truncate result to 6000 characters ✅
+   - Momondo: structured line-by-line text parsing (50+ flights)
+   - Browser: `document.body.innerText` extraction (6000 chars max)
+   - Anti-detection flags for both tools
+   - Extended scrolling (30x800px) for Momondo
+   - Price history storage in JSONL format
 
-**File**: `main.go` (lines 251-425: CDPBrowserFlightTool)
+**Files**:
+- `main.go` (BrowserTool - generic web browsing)
+- `momondo.go` (MomondoFlightTool - dedicated flight scraper)
 
 **Enhancements**:
-- Anti-detection configuration
-- Multiple URL strategies (Momondo, Google Search, direct)
-- Structured data extraction (flight cards, prices)
-- Configurable wait times
+- German locale price parsing (`.` thousands, `,` decimal)
+- Progress callback interface (`ToolWithProgress`) for live updates
+- Price history stored as JSONL in `.phubot/price_history.jsonl`
 
 ---
 
@@ -383,7 +390,65 @@ The implementation includes significant enhancements not in the original specifi
 
 ---
 
-### 6.7 Code Quality Automation ✅
+### 6.7 Multi-Model Support ✅
+
+**Files**: `config.go`, `main.go`, `telegram.go`
+
+**Features**:
+- Configure multiple LLM backends in `models` config array
+- Runtime model switching via Telegram `/model` command
+- Per-model API key, base URL, and model ID
+- Default models: `local` (LM Studio) and `glm5-turbo` (ZhipuAI GLM-5.1)
+
+**Config**:
+```json
+"models": [
+  {"name": "local", "base_url": "http://127.0.0.1:1234/v1", "model": "qwen3.5-9b-mlx"},
+  {"name": "glm5-turbo", "base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "zai-coding-plan/glm-5.1"}
+]
+```
+
+**Telegram Commands**:
+- `/model` or `/model list` — List available models, mark active
+- `/model set <name>` — Switch to a different model
+
+---
+
+### 6.8 Message Deduplication ✅
+
+**File**: `telegram.go`
+
+**Features**:
+- Tracks recent Telegram message IDs with timestamps
+- Skips duplicate messages within a 5-second window
+- Automatic cleanup of old entries when map exceeds 1000 items
+
+---
+
+### 6.9 Live Progress Updates ✅
+
+**Files**: `main.go`, `momondo.go`, `telegram.go`
+
+**Features**:
+- `ToolWithProgress` interface for tools that report progress
+- Rate-limited progress updates via Telegram editMessage (1 update / 2 seconds)
+- Momondo scraper reports: loading page, scrolling, extracting flights
+- Browser tool reports: navigating, loading page, chars extracted
+
+---
+
+### 6.10 Price History ✅
+
+**File**: `momondo.go`
+
+**Features**:
+- Flight prices stored as JSONL in `.phubot/price_history.jsonl`
+- Each entry: timestamp, route, date, airline, price, duration, stops
+- Enables price tracking over time for periodic searches
+
+---
+
+### 6.11 Code Quality Automation ✅
 
 **Files**: `Makefile`, `.git/hooks/pre-commit`
 
@@ -460,7 +525,7 @@ make tidy     # Fix + format + verify
 
 ## 8. Test Coverage
 
-**Total Tests**: 213 test functions
+**Total Tests**: 220+ test functions
 
 **Categories**:
 - Unit tests: Core agent logic
@@ -510,11 +575,28 @@ make tidy     # Fix + format + verify
 # LM Studio server (default: http://127.0.0.1:1234/v1)
 LM_STUDIO_URL=http://localhost:1234/v1
 
+# LM Studio API key
+LM_STUDIO_API_KEY=your-api-key
+
 # Telegram bot token
 TELEGRAM_TOKEN=your-bot-token
 
 # Allowed Telegram user IDs (comma-separated)
 ALLOWED_USERS=123456789,987654321
+```
+
+### Configuration File (`config.json`)
+
+```json
+{
+  "llm": {"base_url": "http://127.0.0.1:1234/v1", "model": "qwen3.5-9b-mlx"},
+  "models": [
+    {"name": "local", "base_url": "http://127.0.0.1:1234/v1", "model": "qwen3.5-9b-mlx"},
+    {"name": "glm5-turbo", "base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "zai-coding-plan/glm-5.1"}
+  ],
+  "telegram": {"token": "", "allowed_users": ""},
+  "agent": {"context_window": 40000, "tool_timeout": "30s"}
+}
 ```
 
 ### Command-Line Flags
@@ -595,10 +677,14 @@ const (
 
 All 5 phases completed with enhancements:
 - Core ReAct loop with circuit breaker ✅
-- Tool registry with 2 tools ✅
-- Browser automation via CDP ✅
+- Tool registry with 3 tools (search_flights, browse_web, schedule_task) ✅
+- Browser automation via CDP with dedicated Momondo scraper ✅
 - Context compaction with summarization ✅
 - CLI and Telegram gateways ✅
+- Multi-model support with runtime switching ✅
+- Message deduplication ✅
+- Live progress updates ✅
+- Price history storage ✅
 
 **Additional Value**:
 - 213 comprehensive tests
@@ -610,6 +696,6 @@ All 5 phases completed with enhancements:
 
 ---
 
-**Last Updated**: 2026-03-28  
+**Last Updated**: 2026-03-29  
 **Implemented By**: tillknuesting with AI assistance  
 **Repository**: https://github.com/tillknuesting/phubot

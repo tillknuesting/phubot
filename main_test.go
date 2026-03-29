@@ -5456,3 +5456,142 @@ func parseDurationTestHelper(input string) (time.Duration, error) {
 	s := NewScheduler(nil, context.Background())
 	return s.ParseDuration(input)
 }
+
+// ==========================================
+// MULTI-MODEL SWITCHING TESTS
+// ==========================================
+
+func TestAgent_SwitchModel_Success(t *testing.T) {
+	agent := newDefaultTestAgent(nil, nil)
+
+	localClient := openai.DefaultConfig("key-local")
+	localClient.BaseURL = "http://localhost:1234/v1"
+	remoteClient := openai.DefaultConfig("key-remote")
+	remoteClient.BaseURL = "https://api.example.com/v1"
+
+	agent.clients = map[string]*openai.Client{
+		"local":  openai.NewClientWithConfig(localClient),
+		"remote": openai.NewClientWithConfig(remoteClient),
+	}
+	agent.modelConfigs = map[string]ModelConfig{
+		"local":  {Name: "local", BaseURL: "http://localhost:1234/v1", Model: "model-a"},
+		"remote": {Name: "remote", BaseURL: "https://api.example.com/v1", Model: "model-b"},
+	}
+	agent.activeModel = "local"
+
+	if agent.ActiveModelName() != "local" {
+		t.Errorf("expected active model 'local', got %q", agent.ActiveModelName())
+	}
+
+	if err := agent.SwitchModel("remote"); err != nil {
+		t.Fatalf("SwitchModel failed: %v", err)
+	}
+
+	if agent.ActiveModelName() != "remote" {
+		t.Errorf("expected active model 'remote', got %q", agent.ActiveModelName())
+	}
+
+	agent.mu.RLock()
+	model := agent.model
+	agent.mu.RUnlock()
+	if model != "model-b" {
+		t.Errorf("expected model 'model-b', got %q", model)
+	}
+}
+
+func TestAgent_SwitchModel_UnknownModel(t *testing.T) {
+	agent := newDefaultTestAgent(nil, nil)
+	agent.clients = map[string]*openai.Client{
+		"local": agent.client,
+	}
+	agent.modelConfigs = map[string]ModelConfig{
+		"local": {Name: "local", BaseURL: "http://localhost:1234/v1", Model: "test"},
+	}
+	agent.activeModel = "local"
+
+	err := agent.SwitchModel("nonexistent")
+	if err == nil {
+		t.Error("expected error switching to unknown model")
+	}
+	if agent.ActiveModelName() != "local" {
+		t.Errorf("active model should not change after failed switch, got %q", agent.ActiveModelName())
+	}
+}
+
+func TestAgent_ListModels(t *testing.T) {
+	agent := newDefaultTestAgent(nil, nil)
+	agent.clients = map[string]*openai.Client{
+		"local":  agent.client,
+		"remote": agent.client,
+	}
+	agent.modelConfigs = map[string]ModelConfig{
+		"local":  {Name: "local", BaseURL: "http://localhost:1234/v1", Model: "model-a"},
+		"remote": {Name: "remote", BaseURL: "https://api.example.com/v1", Model: "model-b"},
+	}
+
+	models := agent.ListModels()
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+
+	names := map[string]bool{}
+	for _, m := range models {
+		names[m.Name] = true
+	}
+	if !names["local"] || !names["remote"] {
+		t.Errorf("expected local and remote models, got %v", names)
+	}
+}
+
+func TestAgent_ActiveModelName_Default(t *testing.T) {
+	agent := newDefaultTestAgent(nil, nil)
+	agent.activeModel = "local"
+
+	if agent.ActiveModelName() != "local" {
+		t.Errorf("expected 'local', got %q", agent.ActiveModelName())
+	}
+}
+
+func TestAgent_SwitchModel_PreservesClient(t *testing.T) {
+	agent := newDefaultTestAgent(nil, nil)
+
+	cfg1 := openai.DefaultConfig("key1")
+	cfg1.BaseURL = "http://host1/v1"
+	cfg2 := openai.DefaultConfig("key2")
+	cfg2.BaseURL = "http://host2/v1"
+
+	client1 := openai.NewClientWithConfig(cfg1)
+	client2 := openai.NewClientWithConfig(cfg2)
+
+	agent.clients = map[string]*openai.Client{
+		"a": client1,
+		"b": client2,
+	}
+	agent.modelConfigs = map[string]ModelConfig{
+		"a": {Name: "a", Model: "model-a"},
+		"b": {Name: "b", Model: "model-b"},
+	}
+	agent.activeModel = "a"
+
+	if err := agent.SwitchModel("b"); err != nil {
+		t.Fatal(err)
+	}
+
+	agent.mu.RLock()
+	c := agent.client
+	agent.mu.RUnlock()
+	if c != client2 {
+		t.Error("expected client to be switched to client2")
+	}
+
+	if err := agent.SwitchModel("a"); err != nil {
+		t.Fatal(err)
+	}
+
+	agent.mu.RLock()
+	c = agent.client
+	agent.mu.RUnlock()
+	if c != client1 {
+		t.Error("expected client to be switched back to client1")
+	}
+}

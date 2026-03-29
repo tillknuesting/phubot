@@ -20,6 +20,7 @@ func newTestTelegramBot(t *testing.T, allowedIDs []int64) *TelegramBot {
 		scheduler:    NewScheduler(nil, context.Background()),
 		ctx:          context.Background(),
 		allowedUsers: allowed,
+		recentMsgs:   make(map[int]time.Time),
 	}
 }
 
@@ -227,5 +228,66 @@ func TestTelegramBot_SchedulerDuplicateTask(t *testing.T) {
 	err = sched.Schedule("dup", "prompt2", 2*time.Hour)
 	if err == nil {
 		t.Error("expected error scheduling duplicate task")
+	}
+}
+
+// ==========================================
+// MESSAGE DEDUP TESTS
+// ==========================================
+
+func TestIsDuplicate_FirstMessage(t *testing.T) {
+	bot := newTestTelegramBot(t, nil)
+	if bot.isDuplicate(1) {
+		t.Error("first occurrence of message ID 1 should not be duplicate")
+	}
+}
+
+func TestIsDuplicate_SameMessageWithin5Seconds(t *testing.T) {
+	bot := newTestTelegramBot(t, nil)
+
+	bot.isDuplicate(42)
+	if !bot.isDuplicate(42) {
+		t.Error("same message ID within 5 seconds should be detected as duplicate")
+	}
+}
+
+func TestIsDuplicate_DifferentMessageIDs(t *testing.T) {
+	bot := newTestTelegramBot(t, nil)
+
+	bot.isDuplicate(1)
+	if bot.isDuplicate(2) {
+		t.Error("different message ID should not be duplicate")
+	}
+}
+
+func TestIsDuplicate_ExpiredEntry(t *testing.T) {
+	bot := newTestTelegramBot(t, nil)
+
+	bot.recentMsgsMu.Lock()
+	bot.recentMsgs[99] = time.Now().Add(-10 * time.Second)
+	bot.recentMsgsMu.Unlock()
+
+	if bot.isDuplicate(99) {
+		t.Error("message ID older than 5 seconds should not be duplicate")
+	}
+}
+
+func TestIsDuplicate_Cleanup(t *testing.T) {
+	bot := newTestTelegramBot(t, nil)
+
+	bot.recentMsgsMu.Lock()
+	for i := range 1001 {
+		bot.recentMsgs[i] = time.Now().Add(-20 * time.Second)
+	}
+	bot.recentMsgsMu.Unlock()
+
+	bot.isDuplicate(9999)
+
+	bot.recentMsgsMu.Lock()
+	count := len(bot.recentMsgs)
+	bot.recentMsgsMu.Unlock()
+
+	if count > 100 {
+		t.Errorf("expected cleanup to reduce map size, got %d entries", count)
 	}
 }
