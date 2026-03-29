@@ -1566,6 +1566,8 @@ func (a *Agent) pruneToolResults(history []openai.ChatCompletionMessage) []opena
 // ==========================================
 
 func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
+	a.RefreshSystemPrompt()
+
 	a.appendHistory(openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: userInput,
@@ -1703,6 +1705,8 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 }
 
 func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 string) (string, error) {
+	a.RefreshSystemPrompt()
+
 	a.mu.Lock()
 	a.history = append(a.history, openai.ChatCompletionMessage{
 		Role: openai.ChatMessageRoleUser,
