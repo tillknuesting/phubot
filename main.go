@@ -1136,6 +1136,8 @@ func NewAgent(client *openai.Client, wal *WAL) *Agent {
 
 func (a *Agent) buildSystemPrompt() string {
 	base := a.baseSystemPrompt
+	now := time.Now().Format("Mon, 02 Jan 2006 15:04:05 MST")
+	base = fmt.Sprintf("Current date and time: %s\n\n%s", now, base)
 	if a.memory == nil {
 		return base
 	}

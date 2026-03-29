@@ -1796,8 +1796,11 @@ func TestBuildSystemPrompt_NoMemory_CM(t *testing.T) {
 	agent.memory = nil
 
 	prompt := agent.buildSystemPrompt()
-	if prompt != agent.baseSystemPrompt {
-		t.Errorf("without memory, prompt should equal base: got %q", prompt)
+	if !strings.HasPrefix(prompt, "Current date and time:") {
+		t.Errorf("expected date prefix, got %q", prompt)
+	}
+	if !strings.Contains(prompt, agent.baseSystemPrompt) {
+		t.Errorf("without memory, prompt should contain base: got %q", prompt)
 	}
 }
 

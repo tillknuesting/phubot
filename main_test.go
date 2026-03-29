@@ -4110,7 +4110,10 @@ func TestBuildSystemPrompt_NoMemory(t *testing.T) {
 		memory:           nil,
 	}
 	prompt := agent.buildSystemPrompt()
-	if prompt != "You are a helpful assistant." {
+	if !strings.HasPrefix(prompt, "Current date and time:") {
+		t.Fatalf("expected date prefix, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "You are a helpful assistant.") {
 		t.Fatalf("expected base prompt, got %q", prompt)
 	}
 }
@@ -4123,8 +4126,14 @@ func TestBuildSystemPrompt_EmptyMemory(t *testing.T) {
 		memory:           mem,
 	}
 	prompt := agent.buildSystemPrompt()
-	if prompt != "You are a helpful assistant." {
+	if !strings.HasPrefix(prompt, "Current date and time:") {
+		t.Fatalf("expected date prefix, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "You are a helpful assistant.") {
 		t.Fatalf("expected base prompt when memory is empty, got %q", prompt)
+	}
+	if strings.Contains(prompt, "Remembered Context") {
+		t.Fatalf("should not contain memory section when memory is empty, got %q", prompt)
 	}
 }
 
@@ -4138,6 +4147,9 @@ func TestBuildSystemPrompt_WithMemory(t *testing.T) {
 		memory:           mem,
 	}
 	prompt := agent.buildSystemPrompt()
+	if !strings.HasPrefix(prompt, "Current date and time:") {
+		t.Fatal("prompt should start with date prefix")
+	}
 	if !strings.Contains(prompt, "You are a helpful assistant.") {
 		t.Fatal("prompt should contain base prompt")
 	}
