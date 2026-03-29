@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -20,6 +21,8 @@ type TelegramBot struct {
 	scheduler    *Scheduler
 	ctx          context.Context
 	allowedUsers map[int64]bool
+	recentMsgs   map[int]time.Time
+	recentMsgsMu sync.Mutex
 }
 
 func NewTelegramBot(token string, agent *Agent, scheduler *Scheduler, ctx context.Context, allowedUserIDs []int64) (*TelegramBot, error) {
@@ -41,6 +44,7 @@ func NewTelegramBot(token string, agent *Agent, scheduler *Scheduler, ctx contex
 		scheduler:    scheduler,
 		ctx:          ctx,
 		allowedUsers: allowed,
+		recentMsgs:   make(map[int]time.Time),
 	}, nil
 }
 
@@ -49,6 +53,28 @@ func (t *TelegramBot) isAllowed(userID int64) bool {
 		return true
 	}
 	return t.allowedUsers[userID]
+}
+
+func (t *TelegramBot) isDuplicate(msgID int) bool {
+	t.recentMsgsMu.Lock()
+	defer t.recentMsgsMu.Unlock()
+
+	now := time.Now()
+	if last, ok := t.recentMsgs[msgID]; ok && now.Sub(last) < 5*time.Second {
+		return true
+	}
+	t.recentMsgs[msgID] = now
+
+	if len(t.recentMsgs) > 1000 {
+		cutoff := now.Add(-10 * time.Second)
+		for id, ts := range t.recentMsgs {
+			if ts.Before(cutoff) {
+				delete(t.recentMsgs, id)
+			}
+		}
+	}
+
+	return false
 }
 
 func (t *TelegramBot) Run() error {
@@ -70,6 +96,12 @@ func (t *TelegramBot) Run() error {
 				log.Printf("[Telegram] Unauthorized access from user %d (%s)",
 					update.Message.From.ID, update.Message.From.UserName)
 				t.sendMessage(update.Message.Chat.ID, "Unauthorized")
+				continue
+			}
+
+			if t.isDuplicate(update.Message.MessageID) {
+				log.Printf("[Telegram] Duplicate message %d from %s, skipping",
+					update.Message.MessageID, update.Message.From.UserName)
 				continue
 			}
 
@@ -153,12 +185,48 @@ func (t *TelegramBot) handleMessage(msg *tgbotapi.Message) {
 	log.Printf("[Telegram] [%s] %s", msg.From.UserName, text)
 
 	if text == "/start" {
-		t.sendMessage(chatID, "👋 Hello! I'm your personal assistant. Ask me anything or use these commands:\n\n/tasks - List scheduled tasks\n/cancel <id> - Cancel a task\n/help - Show this message")
+		t.sendMessage(chatID, "👋 Hello! I'm your personal assistant. Ask me anything or use these commands:\n\n/model - List/switch models\n/tasks - List scheduled tasks\n/cancel <id> - Cancel a task\n/help - Show this message")
 		return
 	}
 
 	if text == "/help" {
-		t.sendMessage(chatID, "Commands:\n/tasks - List scheduled tasks\n/cancel <id> - Cancel a scheduled task\n\nYou can ask me to do things periodically, e.g.:\n\"Check flight prices from HKT to FRA every 2 hours\"")
+		t.sendMessage(chatID, "Commands:\n/model - List available models\n/model set <name> - Switch model\n/tasks - List scheduled tasks\n/cancel <id> - Cancel a scheduled task\n\nYou can ask me to do things periodically, e.g.:\n\"Check flight prices from HKT to FRA every 2 hours\"")
+		return
+	}
+
+	if text == "/model" || text == "/model list" {
+		models := t.agent.ListModels()
+		active := t.agent.ActiveModelName()
+		var sb strings.Builder
+		sb.WriteString("Available models:\n\n")
+		for _, m := range models {
+			if m.Name == active {
+				sb.WriteString(fmt.Sprintf("  * %s (%s @ %s) [active]\n", m.Name, m.Model, m.BaseURL))
+			} else {
+				sb.WriteString(fmt.Sprintf("  %s (%s @ %s)\n", m.Name, m.Model, m.BaseURL))
+			}
+		}
+		sb.WriteString("\nUse /model set <name> to switch.")
+		t.sendMessage(chatID, sb.String())
+		return
+	}
+
+	if after, ok := strings.CutPrefix(text, "/model set "); ok {
+		name := strings.TrimSpace(after)
+		if name == "" {
+			t.sendMessage(chatID, "Usage: /model set <name>")
+			return
+		}
+		if err := t.agent.SwitchModel(name); err != nil {
+			t.sendMessage(chatID, fmt.Sprintf("Error: %v", err))
+		} else {
+			t.sendMessage(chatID, fmt.Sprintf("Switched to model %q.", name))
+		}
+		return
+	}
+
+	if strings.HasPrefix(text, "/model") {
+		t.sendMessage(chatID, "Usage:\n/model - List models\n/model set <name> - Switch model")
 		return
 	}
 

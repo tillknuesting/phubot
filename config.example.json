@@ -23,5 +23,19 @@
     "dir": ".phubot",
     "file": "history.wal",
     "max_size": 5242880
-  }
+  },
+  "models": [
+    {
+      "name": "local",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "api_key": "",
+      "model": "qwen3.5-9b-mlx"
+    },
+    {
+      "name": "glm5-turbo",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "api_key": "",
+      "model": "zai-coding-plan/glm-5.1"
+    }
+  ]
 }

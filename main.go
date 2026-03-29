@@ -928,22 +928,25 @@ type SummarizeFunc func(ctx context.Context, prompt string, messages []openai.Ch
 //	agent.RegisterTool(&MyTool{})
 //	reply, _ := agent.Chat(ctx, "Hello")
 type Agent struct {
-	mu               sync.RWMutex                   // Protects concurrent access to agent state
-	client           *openai.Client                 // OpenAI-compatible client (LM Studio)
-	tools            map[string]Tool                // Registry of available tools
-	history          []openai.ChatCompletionMessage // Conversation history
-	wal              *WAL                           // Write-Ahead Log for persistence
-	memory           *Memory                        // Long-term memory system
-	model            string                         // LLM model identifier
-	contextWindow    int                            // Total context window in tokens
-	reserveTokens    int                            // Token threshold for compaction trigger (calculated)
-	keepRecentTokens int                            // Token budget for recent messages (calculated)
-	summarizer       SummarizeFunc                  // Custom summarization function (optional)
-	baseSystemPrompt string                         // Base system prompt (without memory)
-	toolTimeout      time.Duration                  // Maximum tool execution time
-	loopDetector     *LoopDetector                  // Detects infinite tool call loops
-	pruningConfig    PruningConfig                  // Tool result pruning configuration
-	progressCb       func(string)                   // Progress callback for UI updates (e.g. Telegram)
+	mu               sync.RWMutex
+	client           *openai.Client
+	clients          map[string]*openai.Client
+	modelConfigs     map[string]ModelConfig
+	activeModel      string
+	tools            map[string]Tool
+	history          []openai.ChatCompletionMessage
+	wal              *WAL
+	memory           *Memory
+	model            string
+	contextWindow    int
+	reserveTokens    int
+	keepRecentTokens int
+	summarizer       SummarizeFunc
+	baseSystemPrompt string
+	toolTimeout      time.Duration
+	loopDetector     *LoopDetector
+	pruningConfig    PruningConfig
+	progressCb       func(string)
 }
 
 // LoopDetector identifies when the LLM is stuck in a repetitive tool call pattern.
@@ -1241,6 +1244,40 @@ func (a *Agent) getProgressCallback() func(string) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.progressCb
+}
+
+func (a *Agent) SwitchModel(name string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	client, ok := a.clients[name]
+	if !ok {
+		return fmt.Errorf("unknown model %q", name)
+	}
+	mc := a.modelConfigs[name]
+
+	a.client = client
+	a.model = mc.Model
+	a.activeModel = name
+
+	log.Printf("[Agent] Switched to model %q (%s @ %s)", name, mc.Model, mc.BaseURL)
+	return nil
+}
+
+func (a *Agent) ListModels() []ModelConfig {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	result := make([]ModelConfig, 0, len(a.modelConfigs))
+	for _, mc := range a.modelConfigs {
+		result = append(result, mc)
+	}
+	return result
+}
+
+func (a *Agent) ActiveModelName() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.activeModel
 }
 
 func (a *Agent) GetHistory() []openai.ChatCompletionMessage {
@@ -2282,6 +2319,31 @@ func main() {
 
 	client := openai.NewClientWithConfig(llmConfig)
 
+	clients := make(map[string]*openai.Client)
+	modelConfigs := make(map[string]ModelConfig)
+
+	if len(cfg.Models) > 0 {
+		for _, mc := range cfg.Models {
+			mcKey := mc.APIKey
+			if mcKey == "" {
+				mcKey = apiKey
+			}
+			mcCfg := openai.DefaultConfig(mcKey)
+			mcCfg.BaseURL = mc.BaseURL
+			clients[mc.Name] = openai.NewClientWithConfig(mcCfg)
+			modelConfigs[mc.Name] = mc
+			log.Printf("[Config] Model %q: %s @ %s", mc.Name, mc.Model, mc.BaseURL)
+		}
+	} else {
+		clients["local"] = client
+		modelConfigs["local"] = ModelConfig{
+			Name:    "local",
+			BaseURL: cfg.LLM.BaseURL,
+			APIKey:  apiKey,
+			Model:   cfg.LLM.Model,
+		}
+	}
+
 	wal, err := OpenWAL()
 	if err != nil {
 		log.Fatalf("Failed to open WAL: %v", err)
@@ -2289,11 +2351,19 @@ func main() {
 
 	agent := NewAgent(client, wal)
 	agent.setModel(cfg.LLM.Model)
+	agent.clients = clients
+	agent.modelConfigs = modelConfigs
+	agent.activeModel = "local"
+	if len(cfg.Models) > 0 {
+		agent.activeModel = cfg.Models[0].Name
+	}
 	agent.setContextWindow(cfg.Agent.ContextWindow)
 	agent.SetToolTimeout(cfg.Agent.ToolTimeout.ToDuration())
 	agent.setPruningConfig(cfg.PruningConfig())
 	agent.RegisterTool(&MomondoFlightTool{})
 	agent.RegisterTool(&BrowserTool{})
+
+	log.Printf("[Config] Active model: %s", agent.ActiveModelName())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -45,6 +45,14 @@ type Config struct {
 	Agent    AgentConfig    `json:"agent"`
 	Memory   MemoryConfig   `json:"memory"`
 	WAL      WALConfig      `json:"wal"`
+	Models   []ModelConfig  `json:"models"`
+}
+
+type ModelConfig struct {
+	Name    string `json:"name"`
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	Model   string `json:"model"`
 }
 
 type LLMConfig struct {
@@ -102,6 +110,20 @@ var defaultConfig = Config{
 		Dir:     ".phubot",
 		File:    "history.wal",
 		MaxSize: 5 * 1024 * 1024,
+	},
+	Models: []ModelConfig{
+		{
+			Name:    "local",
+			BaseURL: "http://127.0.0.1:1234/v1",
+			APIKey:  "",
+			Model:   "qwen3.5-9b-mlx",
+		},
+		{
+			Name:    "glm5-turbo",
+			BaseURL: "https://open.bigmodel.cn/api/paas/v4",
+			APIKey:  "",
+			Model:   "zai-coding-plan/glm-5.1",
+		},
 	},
 }
 
