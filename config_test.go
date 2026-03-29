@@ -402,7 +402,7 @@ func TestConfig_DefaultModels(t *testing.T) {
 	if cfg.Models[1].BaseURL != "https://api.z.ai/api/coding/paas/v4" {
 		t.Errorf("expected glm5 base URL, got %q", cfg.Models[1].BaseURL)
 	}
-	if cfg.Models[1].Model != "glm-5" {
+	if cfg.Models[1].Model != "glm-5.1" {
 		t.Errorf("expected glm5 model ID, got %q", cfg.Models[1].Model)
 	}
 }

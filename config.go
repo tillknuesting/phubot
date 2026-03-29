@@ -122,7 +122,7 @@ var defaultConfig = Config{
 			Name:    "glm5-turbo",
 			BaseURL: "https://api.z.ai/api/coding/paas/v4",
 			APIKey:  "",
-			Model:   "glm-5",
+			Model:   "glm-5.1",
 		},
 	},
 }
