@@ -111,6 +111,7 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 	targetURL := buildMomondoURL(params.Origin, params.Destination, params.Date, "", adults, params.Children, sortBy)
 
 	log.Printf("[Momondo] Searching: %s", targetURL)
+	log.Printf("[Momondo] Params: origin=%s, dest=%s, date=%s, adults=%d, sort=%s", params.Origin, params.Destination, params.Date, adults, sortBy)
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false),
@@ -159,6 +160,7 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 	}
 
 	var bodyText string
+	log.Printf("[Momondo] Starting page poll (up to 30 rounds)")
 	for i := range 30 {
 		time.Sleep(2 * time.Second)
 
@@ -187,6 +189,7 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 	}
 
 	flights := ParseMomondoFlights(bodyText)
+	log.Printf("[Momondo] Parsed %d flights from body text (%d chars)", len(flights), len(bodyText))
 
 	if len(flights) == 0 {
 		preview := truncate(bodyText, 4000)
@@ -258,6 +261,8 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 	}
 	if err := AppendPriceHistory(entry); err != nil {
 		log.Printf("[Momondo] Failed to save price history: %v", err)
+	} else {
+		log.Printf("[Momondo] Price history saved: %s→%s %s, %d flights", entry.Origin, entry.Destination, entry.Date, entry.Count)
 	}
 
 	return sb.String(), nil

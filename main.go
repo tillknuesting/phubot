@@ -1156,6 +1156,7 @@ func (a *Agent) RefreshSystemPrompt() {
 	for i := range a.history {
 		if a.history[i].Role == openai.ChatMessageRoleSystem {
 			a.history[i].Content = newPrompt
+			log.Printf("[Agent] System prompt refreshed (date updated)")
 			break
 		}
 	}
@@ -1568,6 +1569,9 @@ func (a *Agent) pruneToolResults(history []openai.ChatCompletionMessage) []opena
 func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 	a.RefreshSystemPrompt()
 
+	log.Printf("[Chat] === New message ===")
+	log.Printf("[Chat] User input: %s", truncate(userInput, 200))
+
 	a.appendHistory(openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: userInput,
@@ -1586,6 +1590,11 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 	copy(historyCopy, a.history)
 	a.mu.RUnlock()
 
+	log.Printf("[Chat] History size: %d messages, %d tools available", len(historyCopy), len(openAITools))
+	for _, t := range openAITools {
+		log.Printf("[Chat] Registered tool: %s", t.Function.Name)
+	}
+
 	// NEW: Prune tool results before sending to LLM (Tier 1)
 	historyCopy = a.pruneToolResults(historyCopy)
 
@@ -1598,27 +1607,33 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 		resp, err := a.client.CreateChatCompletion(ctx, req)
 		if err != nil {
+			log.Printf("[Chat] LLM error: %v", err)
 			return "", err
 		}
 
 		if len(resp.Choices) == 0 {
+			log.Printf("[Chat] LLM returned no choices")
 			return "", fmt.Errorf("LLM returned no choices")
 		}
 
 		msg := resp.Choices[0].Message
+		log.Printf("[Chat] LLM response: content=%q, tool_calls=%d", truncate(msg.Content, 100), len(msg.ToolCalls))
 
 		if len(msg.ToolCalls) == 0 {
 			msg.Content = cleanResponse(msg.Content)
+			log.Printf("[Chat] Final reply (no tool calls): %s", truncate(msg.Content, 200))
 			a.appendHistory(msg)
 			return msg.Content, nil
 		}
 
+		log.Printf("[Chat] Model requested %d tool call(s)", len(msg.ToolCalls))
 		a.appendHistory(msg)
 		historyCopy = append(historyCopy, msg)
 
 		for _, toolCall := range msg.ToolCalls {
 			toolName := toolCall.Function.Name
 			toolArgs := toolCall.Function.Arguments
+			log.Printf("[Chat] Tool call: %s(%s)", toolName, truncate(toolArgs, 200))
 
 			a.mu.RLock()
 			tool, exists := a.tools[toolName]
@@ -1627,6 +1642,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			a.mu.RUnlock()
 
 			if !exists {
+				log.Printf("[Chat] Tool %q NOT FOUND", toolName)
 				toolMsg := openai.ChatCompletionMessage{
 					Role:       openai.ChatMessageRoleTool,
 					Content:    fmt.Sprintf("Error: tool %q does not exist. Use only the available tools.", toolName),
@@ -1652,6 +1668,9 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 			var resultText string
 			var err error
+
+			log.Printf("[Chat] Executing tool %q...", toolName)
+			start := time.Now()
 
 			if tc, ok := tool.(ToolWithContext); ok {
 				toolCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -1688,6 +1707,9 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 			loopDetector.record(toolName, toolArgs, resultText)
 
+			elapsed := time.Since(start)
+			log.Printf("[Chat] Tool %q completed in %v, result: %s", toolName, elapsed, truncate(resultText, 200))
+
 			toolMsg := openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
 				Content:    resultText,
@@ -1706,6 +1728,8 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 string) (string, error) {
 	a.RefreshSystemPrompt()
+	log.Printf("[ChatWithImage] === New image message ===")
+	log.Printf("[ChatWithImage] Prompt: %s", truncate(prompt, 200))
 
 	a.mu.Lock()
 	a.history = append(a.history, openai.ChatCompletionMessage{
