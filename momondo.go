@@ -46,7 +46,19 @@ type FlightSearchResult struct {
 	Fastest  string   `json:"fastest,omitempty"`
 }
 
-type MomondoFlightTool struct{}
+type MomondoFlightTool struct {
+	progressCb func(string)
+}
+
+func (t *MomondoFlightTool) SetProgressCallback(cb func(string)) {
+	t.progressCb = cb
+}
+
+func (t *MomondoFlightTool) progress(msg string) {
+	if t.progressCb != nil {
+		t.progressCb(msg)
+	}
+}
 
 func (t *MomondoFlightTool) Name() string { return "search_flights" }
 
@@ -112,6 +124,7 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 
 	log.Printf("[Momondo] Searching: %s", targetURL)
 	log.Printf("[Momondo] Params: origin=%s, dest=%s, date=%s, adults=%d, sort=%s", params.Origin, params.Destination, params.Date, adults, sortBy)
+	t.progress(fmt.Sprintf("🔍 Searching %s → %s on %s (%d adults)...", params.Origin, params.Destination, params.Date, adults))
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false),
@@ -159,6 +172,8 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 		return "", fmt.Errorf("navigation failed: %v", err)
 	}
 
+	t.progress("🌐 Page loaded, waiting for flight results...")
+
 	var bodyText string
 	log.Printf("[Momondo] Starting page poll (up to 30 rounds)")
 	for i := range 30 {
@@ -172,7 +187,12 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 		hasPrices := strings.Contains(bodyText, "€") && strings.Contains(bodyText, "/Person")
 		log.Printf("[Momondo] Poll %d: prices=%v len=%d", i+1, hasPrices, len(bodyText))
 
+		if i%3 == 0 {
+			t.progress(fmt.Sprintf("⏳ Waiting for results... (poll %d/30, prices found: %v)", i+1, hasPrices))
+		}
+
 		if hasPrices && i >= 3 {
+			t.progress("📜 Scrolling for more flight results...")
 			scrollAndWait(timeoutCtx)
 			scrollAndWait(timeoutCtx)
 			chromedp.Run(timeoutCtx, chromedp.Evaluate(`document.body.innerText`, &bodyText))
@@ -180,6 +200,7 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 		}
 
 		if strings.Contains(bodyText, "Leider keine Ergebnisse") {
+			t.progress("❌ No results found on Momondo")
 			break
 		}
 	}
@@ -190,6 +211,10 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 
 	flights := ParseMomondoFlights(bodyText)
 	log.Printf("[Momondo] Parsed %d flights from body text (%d chars)", len(flights), len(bodyText))
+
+	if len(flights) > 0 {
+		t.progress(fmt.Sprintf("✈️ Found %d flights, preparing results...", len(flights)))
+	}
 
 	if len(flights) == 0 {
 		preview := truncate(bodyText, 4000)
@@ -264,6 +289,8 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 	} else {
 		log.Printf("[Momondo] Price history saved: %s→%s %s, %d flights", entry.Origin, entry.Destination, entry.Date, entry.Count)
 	}
+
+	t.progress(fmt.Sprintf("✅ Done! Found %d flights, cheapest: %s", result.Count, result.Cheapest))
 
 	return sb.String(), nil
 }

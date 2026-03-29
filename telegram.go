@@ -194,6 +194,16 @@ func (t *TelegramBot) handleMessage(msg *tgbotapi.Message) {
 
 	statusMsgID := t.sendMessage(chatID, "🤔 Thinking...")
 
+	var lastProgress time.Time
+	progressCb := func(msg string) {
+		if time.Since(lastProgress) < 2*time.Second {
+			return
+		}
+		lastProgress = time.Now()
+		t.editMessage(chatID, statusMsgID, msg)
+	}
+	t.agent.SetProgressCallback(progressCb)
+
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(4 * time.Second)
@@ -210,6 +220,7 @@ func (t *TelegramBot) handleMessage(msg *tgbotapi.Message) {
 
 	reply, err := t.agent.Chat(t.ctx, text)
 	close(done)
+	t.agent.SetProgressCallback(nil)
 
 	if err != nil {
 		log.Printf("[Telegram] Error: %v", err)

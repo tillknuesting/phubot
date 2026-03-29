@@ -387,6 +387,65 @@ func TestMomondoFlightTool_ImplementsTool(t *testing.T) {
 	var _ Tool = &MomondoFlightTool{}
 }
 
+func TestMomondoFlightTool_ImplementsToolWithProgress(t *testing.T) {
+	var _ ToolWithProgress = &MomondoFlightTool{}
+}
+
+func TestMomondoFlightTool_SetProgressCallback(t *testing.T) {
+	tool := &MomondoFlightTool{}
+	var received []string
+	tool.SetProgressCallback(func(msg string) {
+		received = append(received, msg)
+	})
+	tool.progress("test message 1")
+	tool.progress("test message 2")
+
+	if len(received) != 2 {
+		t.Fatalf("expected 2 progress messages, got %d", len(received))
+	}
+	if received[0] != "test message 1" || received[1] != "test message 2" {
+		t.Fatalf("messages mismatch: %v", received)
+	}
+}
+
+func TestMomondoFlightTool_ProgressNoCallback(t *testing.T) {
+	tool := &MomondoFlightTool{}
+	tool.progress("should not panic")
+}
+
+func TestMomondoFlightTool_ClearProgressCallback(t *testing.T) {
+	tool := &MomondoFlightTool{}
+	called := false
+	tool.SetProgressCallback(func(msg string) { called = true })
+	tool.SetProgressCallback(nil)
+	tool.progress("should not call")
+	if called {
+		t.Fatal("callback should have been cleared")
+	}
+}
+
+func TestBrowserTool_ImplementsToolWithProgress(t *testing.T) {
+	var _ ToolWithProgress = &BrowserTool{}
+}
+
+func TestBrowserTool_SetProgressCallback(t *testing.T) {
+	tool := &BrowserTool{}
+	var received []string
+	tool.SetProgressCallback(func(msg string) {
+		received = append(received, msg)
+	})
+	tool.progress("loading page")
+
+	if len(received) != 1 || received[0] != "loading page" {
+		t.Fatalf("expected progress, got: %v", received)
+	}
+}
+
+func TestBrowserTool_ProgressNoCallback(t *testing.T) {
+	tool := &BrowserTool{}
+	tool.progress("should not panic")
+}
+
 func TestAppendPriceHistory_CreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	origDir, _ := os.Getwd()

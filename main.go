@@ -113,6 +113,10 @@ type ToolWithContext interface {
 	ExecuteWithContext(ctx context.Context, args string) (string, error)
 }
 
+type ToolWithProgress interface {
+	SetProgressCallback(cb func(string))
+}
+
 // ==========================================
 // CONFIGURATION CONSTANTS
 // ==========================================
@@ -476,7 +480,19 @@ func (w *WAL) Rewrite(messages []openai.ChatCompletionMessage) error {
 // BROWSER ENGINE (CDP)
 // ==========================================
 
-type BrowserTool struct{}
+type BrowserTool struct {
+	progressCb func(string)
+}
+
+func (t *BrowserTool) SetProgressCallback(cb func(string)) {
+	t.progressCb = cb
+}
+
+func (t *BrowserTool) progress(msg string) {
+	if t.progressCb != nil {
+		t.progressCb(msg)
+	}
+}
 
 func (t *BrowserTool) Name() string { return "browse_web" }
 
@@ -517,6 +533,7 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 	}
 
 	log.Printf("[Browser] Navigating to URL: %s", targetURL)
+	t.progress(fmt.Sprintf("🌐 Browsing %s...", targetURL))
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false),
@@ -558,6 +575,8 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 
 	var pageText string
 
+	t.progress(fmt.Sprintf("⏳ Loading page (waiting %ds)...", waitSecs))
+
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(targetURL),
 		chromedp.Sleep(2*time.Second),
@@ -581,6 +600,7 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 	}
 
 	log.Printf("[Browser] Page scraped successfully (%d chars)", len(pageText))
+	t.progress(fmt.Sprintf("✅ Page loaded (%d chars extracted)", len(pageText)))
 
 	return "BROWSER EXTRACTED:\n" + pageText, nil
 }
@@ -923,6 +943,7 @@ type Agent struct {
 	toolTimeout      time.Duration                  // Maximum tool execution time
 	loopDetector     *LoopDetector                  // Detects infinite tool call loops
 	pruningConfig    PruningConfig                  // Tool result pruning configuration
+	progressCb       func(string)                   // Progress callback for UI updates (e.g. Telegram)
 }
 
 // LoopDetector identifies when the LLM is stuck in a repetitive tool call pattern.
@@ -1208,6 +1229,18 @@ func (a *Agent) setPruningConfig(pc PruningConfig) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.pruningConfig = pc
+}
+
+func (a *Agent) SetProgressCallback(cb func(string)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.progressCb = cb
+}
+
+func (a *Agent) getProgressCallback() func(string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.progressCb
 }
 
 func (a *Agent) GetHistory() []openai.ChatCompletionMessage {
@@ -1639,7 +1672,12 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			tool, exists := a.tools[toolName]
 			timeout := a.toolTimeout
 			loopDetector := a.loopDetector
+			progressCb := a.progressCb
 			a.mu.RUnlock()
+
+			if tp, ok := tool.(ToolWithProgress); ok && progressCb != nil {
+				tp.SetProgressCallback(progressCb)
+			}
 
 			if !exists {
 				log.Printf("[Chat] Tool %q NOT FOUND", toolName)
@@ -1709,6 +1747,10 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 			elapsed := time.Since(start)
 			log.Printf("[Chat] Tool %q completed in %v, result: %s", toolName, elapsed, truncate(resultText, 200))
+
+			if tp, ok := tool.(ToolWithProgress); ok {
+				tp.SetProgressCallback(nil)
+			}
 
 			toolMsg := openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
