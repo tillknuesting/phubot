@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -235,6 +237,28 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 	}
 
 	log.Printf("[Momondo] Scraped %d flights for %s→%s", result.Count, params.Origin, params.Destination)
+
+	entry := PriceEntry{
+		Timestamp:   time.Now(),
+		Origin:      params.Origin,
+		Destination: params.Destination,
+		Date:        params.Date,
+		Adults:      adults,
+		Count:       result.Count,
+	}
+	if len(result.Flights) > 0 {
+		entry.Cheapest = &result.Flights[0]
+	}
+	for _, f := range result.Flights {
+		if f.DurationMin > 0 {
+			entry.Fastest = &f
+			break
+		}
+	}
+	if err := AppendPriceHistory(entry); err != nil {
+		log.Printf("[Momondo] Failed to save price history: %v", err)
+	}
+
 	return sb.String(), nil
 }
 
@@ -489,4 +513,65 @@ func DurMinutes(s string) int {
 		return h*60 + mm
 	}
 	return 0
+}
+
+type PriceEntry struct {
+	Timestamp   time.Time `json:"timestamp"`
+	TaskID      string    `json:"task_id,omitempty"`
+	Origin      string    `json:"origin"`
+	Destination string    `json:"destination"`
+	Date        string    `json:"date"`
+	Adults      int       `json:"adults"`
+	Count       int       `json:"count"`
+	Cheapest    *Flight   `json:"cheapest,omitempty"`
+	Fastest     *Flight   `json:"fastest,omitempty"`
+}
+
+func AppendPriceHistory(entry PriceEntry) error {
+	dir := ".phubot"
+	os.MkdirAll(dir, 0755)
+
+	path := filepath.Join(dir, "price_history.jsonl")
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("marshal price entry: %w", err)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open price history: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write price entry: %w", err)
+	}
+
+	return nil
+}
+
+func LoadPriceHistory() ([]PriceEntry, error) {
+	path := filepath.Join(".phubot", "price_history.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var entries []PriceEntry
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry PriceEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }

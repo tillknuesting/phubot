@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestExtractPrice_SimpleEuro(t *testing.T) {
@@ -381,4 +385,116 @@ func TestMomondoFlightTool_Execute_MalformedJSON(t *testing.T) {
 
 func TestMomondoFlightTool_ImplementsTool(t *testing.T) {
 	var _ Tool = &MomondoFlightTool{}
+}
+
+func TestAppendPriceHistory_CreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	entry := PriceEntry{
+		Timestamp:   time.Now().Truncate(time.Millisecond),
+		Origin:      "HKT",
+		Destination: "FRA",
+		Date:        "2026-05-01",
+		Adults:      2,
+		Count:       5,
+	}
+
+	if err := AppendPriceHistory(entry); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	path := filepath.Join(".phubot", "price_history.jsonl")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Fatal("expected price_history.jsonl to be created")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read: %v", err)
+	}
+
+	var loaded PriceEntry
+	if err := json.Unmarshal(data[:len(data)-1], &loaded); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if loaded.Origin != "HKT" || loaded.Destination != "FRA" || loaded.Count != 5 {
+		t.Fatalf("entry mismatch: %+v", loaded)
+	}
+}
+
+func TestAppendPriceHistory_AppendsMultiple(t *testing.T) {
+	dir := t.TempDir()
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	for i := range 3 {
+		entry := PriceEntry{
+			Timestamp:   time.Now().Truncate(time.Millisecond),
+			Origin:      "HKT",
+			Destination: "FRA",
+			Date:        "2026-05-01",
+			Adults:      2,
+			Count:       i + 1,
+		}
+		if err := AppendPriceHistory(entry); err != nil {
+			t.Fatalf("append %d failed: %v", i, err)
+		}
+	}
+
+	entries, err := LoadPriceHistory()
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	if entries[0].Count != 1 || entries[1].Count != 2 || entries[2].Count != 3 {
+		t.Fatalf("order wrong: %+v", entries)
+	}
+}
+
+func TestLoadPriceHistory_NoFile(t *testing.T) {
+	dir := t.TempDir()
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	entries, err := LoadPriceHistory()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(entries))
+	}
+}
+
+func TestLoadPriceHistory_SkipsBadLines(t *testing.T) {
+	dir := t.TempDir()
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	os.MkdirAll(".phubot", 0755)
+	path := filepath.Join(".phubot", "price_history.jsonl")
+	content := `{"timestamp":"2026-01-01T00:00:00Z","origin":"HKT","destination":"FRA","count":1}
+bad line
+{"timestamp":"2026-01-02T00:00:00Z","origin":"HKT","destination":"KUL","count":2}
+
+`
+	os.WriteFile(path, []byte(content), 0644)
+
+	entries, err := LoadPriceHistory()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 valid entries, got %d", len(entries))
+	}
+	if entries[0].Destination != "FRA" || entries[1].Destination != "KUL" {
+		t.Fatalf("entries wrong: %+v", entries)
+	}
 }
