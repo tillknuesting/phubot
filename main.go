@@ -482,6 +482,11 @@ func (w *WAL) Rewrite(messages []openai.ChatCompletionMessage) error {
 
 type BrowserTool struct {
 	progressCb func(string)
+	headless   bool
+}
+
+func NewBrowserTool(headless bool) *BrowserTool {
+	return &BrowserTool{headless: headless}
 }
 
 func (t *BrowserTool) SetProgressCallback(cb func(string)) {
@@ -536,7 +541,7 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 	t.progress(fmt.Sprintf("🌐 Browsing %s...", targetURL))
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", false),
+		chromedp.Flag("headless", t.headless),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("disable-extensions", false),
 		chromedp.Flag("disable-plugins", false),
@@ -2369,8 +2374,8 @@ func main() {
 	agent.setContextWindow(cfg.Agent.ContextWindow)
 	agent.SetToolTimeout(cfg.Agent.ToolTimeout.ToDuration())
 	agent.setPruningConfig(cfg.PruningConfig())
-	agent.RegisterTool(NewMomondoFlightTool())
-	agent.RegisterTool(&BrowserTool{})
+	agent.RegisterTool(NewMomondoFlightTool(cfg.Agent.Headless))
+	agent.RegisterTool(NewBrowserTool(cfg.Agent.Headless))
 
 	log.Printf("[Config] Active model: %s", agent.ActiveModelName())
 

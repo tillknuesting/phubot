@@ -61,12 +61,14 @@ type MomondoFlightTool struct {
 	cache      map[string]cacheEntry
 	cacheMu    sync.RWMutex
 	cacheTTL   time.Duration
+	headless   bool
 }
 
-func NewMomondoFlightTool() *MomondoFlightTool {
+func NewMomondoFlightTool(headless bool) *MomondoFlightTool {
 	return &MomondoFlightTool{
 		cache:    make(map[string]cacheEntry),
 		cacheTTL: 60 * time.Minute,
+		headless: headless,
 	}
 }
 
@@ -197,7 +199,7 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 	t.progress(fmt.Sprintf("🔍 Searching %s → %s on %s (%d adults)...", params.Origin, params.Destination, params.Date, adults))
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", false),
+		chromedp.Flag("headless", t.headless),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("disable-extensions", false),
 		chromedp.Flag("disable-images", false),

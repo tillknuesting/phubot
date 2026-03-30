@@ -339,14 +339,14 @@ Gesamt: 118 €`
 }
 
 func TestMomondoFlightTool_Name(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	if tool.Name() != "search_flights" {
 		t.Fatalf("expected 'search_flights', got %q", tool.Name())
 	}
 }
 
 func TestMomondoFlightTool_Definition(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	def := tool.Definition()
 
 	if def.Function == nil {
@@ -368,7 +368,7 @@ func TestMomondoFlightTool_Definition(t *testing.T) {
 }
 
 func TestMomondoFlightTool_Execute_MissingRequired(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	_, err := tool.Execute(`{"origin": "HKT"}`)
 	if err == nil {
 		t.Fatal("expected error for missing destination and date")
@@ -376,7 +376,7 @@ func TestMomondoFlightTool_Execute_MissingRequired(t *testing.T) {
 }
 
 func TestMomondoFlightTool_Execute_MalformedJSON(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	_, err := tool.Execute("not json")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
@@ -384,15 +384,15 @@ func TestMomondoFlightTool_Execute_MalformedJSON(t *testing.T) {
 }
 
 func TestMomondoFlightTool_ImplementsTool(t *testing.T) {
-	var _ Tool = NewMomondoFlightTool()
+	var _ Tool = NewMomondoFlightTool(false)
 }
 
 func TestMomondoFlightTool_ImplementsToolWithProgress(t *testing.T) {
-	var _ ToolWithProgress = NewMomondoFlightTool()
+	var _ ToolWithProgress = NewMomondoFlightTool(false)
 }
 
 func TestMomondoFlightTool_SetProgressCallback(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	var received []string
 	tool.SetProgressCallback(func(msg string) {
 		received = append(received, msg)
@@ -409,12 +409,12 @@ func TestMomondoFlightTool_SetProgressCallback(t *testing.T) {
 }
 
 func TestMomondoFlightTool_ProgressNoCallback(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	tool.progress("should not panic")
 }
 
 func TestMomondoFlightTool_ClearProgressCallback(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	called := false
 	tool.SetProgressCallback(func(msg string) { called = true })
 	tool.SetProgressCallback(nil)
@@ -559,7 +559,7 @@ bad line
 }
 
 func TestMomondoCache_BasicSetGet(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 
 	key := tool.cacheKey("HKT", "KUL", "2026-05-01")
 	if _, ok := tool.getCached(key); ok {
@@ -578,7 +578,7 @@ func TestMomondoCache_BasicSetGet(t *testing.T) {
 }
 
 func TestMomondoCache_KeyFormat(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 
 	key := tool.cacheKey("HKT", "FRA", "2026-06-15")
 	if key != "HKT-FRA-2026-06-15" {
@@ -587,7 +587,7 @@ func TestMomondoCache_KeyFormat(t *testing.T) {
 }
 
 func TestMomondoCache_DifferentRoutesNotShared(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 
 	key1 := tool.cacheKey("HKT", "KUL", "2026-05-01")
 	key2 := tool.cacheKey("HKT", "FRA", "2026-05-01")
@@ -605,7 +605,7 @@ func TestMomondoCache_DifferentRoutesNotShared(t *testing.T) {
 }
 
 func TestMomondoCache_TTLExpiry(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	tool.cacheTTL = 100 * time.Millisecond
 
 	key := tool.cacheKey("HKT", "KUL", "2026-05-01")
@@ -623,7 +623,7 @@ func TestMomondoCache_TTLExpiry(t *testing.T) {
 }
 
 func TestMomondoCache_DefaultTTL60Minutes(t *testing.T) {
-	tool := NewMomondoFlightTool()
+	tool := NewMomondoFlightTool(false)
 	if tool.cacheTTL != 60*time.Minute {
 		t.Fatalf("expected 60m TTL, got %v", tool.cacheTTL)
 	}

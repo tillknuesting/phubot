@@ -72,6 +72,7 @@ type AgentConfig struct {
 	ReserveRatio    float64  `json:"reserve_ratio"`
 	KeepRecentRatio float64  `json:"keep_recent_ratio"`
 	PruningMode     string   `json:"pruning_mode"`
+	Headless        bool     `json:"headless"`
 }
 
 type MemoryConfig struct {
@@ -101,6 +102,7 @@ var defaultConfig = Config{
 		ReserveRatio:    0.70,
 		KeepRecentRatio: 0.85,
 		PruningMode:     "aggressive",
+		Headless:        false,
 	},
 	Memory: MemoryConfig{
 		MaxSize:       100 * 1024,
