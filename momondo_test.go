@@ -339,14 +339,14 @@ Gesamt: 118 €`
 }
 
 func TestMomondoFlightTool_Name(t *testing.T) {
-	tool := &MomondoFlightTool{}
+	tool := NewMomondoFlightTool()
 	if tool.Name() != "search_flights" {
 		t.Fatalf("expected 'search_flights', got %q", tool.Name())
 	}
 }
 
 func TestMomondoFlightTool_Definition(t *testing.T) {
-	tool := &MomondoFlightTool{}
+	tool := NewMomondoFlightTool()
 	def := tool.Definition()
 
 	if def.Function == nil {
@@ -368,7 +368,7 @@ func TestMomondoFlightTool_Definition(t *testing.T) {
 }
 
 func TestMomondoFlightTool_Execute_MissingRequired(t *testing.T) {
-	tool := &MomondoFlightTool{}
+	tool := NewMomondoFlightTool()
 	_, err := tool.Execute(`{"origin": "HKT"}`)
 	if err == nil {
 		t.Fatal("expected error for missing destination and date")
@@ -376,7 +376,7 @@ func TestMomondoFlightTool_Execute_MissingRequired(t *testing.T) {
 }
 
 func TestMomondoFlightTool_Execute_MalformedJSON(t *testing.T) {
-	tool := &MomondoFlightTool{}
+	tool := NewMomondoFlightTool()
 	_, err := tool.Execute("not json")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
@@ -384,15 +384,15 @@ func TestMomondoFlightTool_Execute_MalformedJSON(t *testing.T) {
 }
 
 func TestMomondoFlightTool_ImplementsTool(t *testing.T) {
-	var _ Tool = &MomondoFlightTool{}
+	var _ Tool = NewMomondoFlightTool()
 }
 
 func TestMomondoFlightTool_ImplementsToolWithProgress(t *testing.T) {
-	var _ ToolWithProgress = &MomondoFlightTool{}
+	var _ ToolWithProgress = NewMomondoFlightTool()
 }
 
 func TestMomondoFlightTool_SetProgressCallback(t *testing.T) {
-	tool := &MomondoFlightTool{}
+	tool := NewMomondoFlightTool()
 	var received []string
 	tool.SetProgressCallback(func(msg string) {
 		received = append(received, msg)
@@ -409,12 +409,12 @@ func TestMomondoFlightTool_SetProgressCallback(t *testing.T) {
 }
 
 func TestMomondoFlightTool_ProgressNoCallback(t *testing.T) {
-	tool := &MomondoFlightTool{}
+	tool := NewMomondoFlightTool()
 	tool.progress("should not panic")
 }
 
 func TestMomondoFlightTool_ClearProgressCallback(t *testing.T) {
-	tool := &MomondoFlightTool{}
+	tool := NewMomondoFlightTool()
 	called := false
 	tool.SetProgressCallback(func(msg string) { called = true })
 	tool.SetProgressCallback(nil)
@@ -555,5 +555,76 @@ bad line
 	}
 	if entries[0].Destination != "FRA" || entries[1].Destination != "KUL" {
 		t.Fatalf("entries wrong: %+v", entries)
+	}
+}
+
+func TestMomondoCache_BasicSetGet(t *testing.T) {
+	tool := NewMomondoFlightTool()
+
+	key := tool.cacheKey("HKT", "KUL", "2026-05-01")
+	if _, ok := tool.getCached(key); ok {
+		t.Fatal("expected cache miss for empty cache")
+	}
+
+	tool.setCache(key, "5 flights found", "HKT", "KUL", "2026-05-01", 5)
+
+	result, ok := tool.getCached(key)
+	if !ok {
+		t.Fatal("expected cache hit after set")
+	}
+	if result != "5 flights found" {
+		t.Fatalf("expected '5 flights found', got %q", result)
+	}
+}
+
+func TestMomondoCache_KeyFormat(t *testing.T) {
+	tool := NewMomondoFlightTool()
+
+	key := tool.cacheKey("HKT", "FRA", "2026-06-15")
+	if key != "HKT-FRA-2026-06-15" {
+		t.Fatalf("unexpected cache key: %q", key)
+	}
+}
+
+func TestMomondoCache_DifferentRoutesNotShared(t *testing.T) {
+	tool := NewMomondoFlightTool()
+
+	key1 := tool.cacheKey("HKT", "KUL", "2026-05-01")
+	key2 := tool.cacheKey("HKT", "FRA", "2026-05-01")
+
+	tool.setCache(key1, "kul result", "HKT", "KUL", "2026-05-01", 3)
+
+	if _, ok := tool.getCached(key2); ok {
+		t.Fatal("different route should not be in cache")
+	}
+
+	result, ok := tool.getCached(key1)
+	if !ok || result != "kul result" {
+		t.Fatalf("expected cache hit for key1, got ok=%v result=%q", ok, result)
+	}
+}
+
+func TestMomondoCache_TTLExpiry(t *testing.T) {
+	tool := NewMomondoFlightTool()
+	tool.cacheTTL = 100 * time.Millisecond
+
+	key := tool.cacheKey("HKT", "KUL", "2026-05-01")
+	tool.setCache(key, "result", "HKT", "KUL", "2026-05-01", 1)
+
+	if _, ok := tool.getCached(key); !ok {
+		t.Fatal("expected cache hit immediately after set")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	if _, ok := tool.getCached(key); ok {
+		t.Fatal("expected cache miss after TTL expiry")
+	}
+}
+
+func TestMomondoCache_DefaultTTL60Minutes(t *testing.T) {
+	tool := NewMomondoFlightTool()
+	if tool.cacheTTL != 60*time.Minute {
+		t.Fatalf("expected 60m TTL, got %v", tool.cacheTTL)
 	}
 }

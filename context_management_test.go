@@ -320,8 +320,11 @@ func TestPruneToolResults_HardClear_MultipleToolResults(t *testing.T) {
 	if result[1].Content != "[CLEARED]" {
 		t.Errorf("expected first tool result hard-cleared, got: %s", result[1].Content)
 	}
-	if result[3].Content != "[CLEARED]" {
-		t.Errorf("expected second tool result hard-cleared, got: %s", result[3].Content)
+	if result[3].Content == "[CLEARED]" {
+		t.Errorf("expected latest tool result to be preserved, but it was hard-cleared")
+	}
+	if result[3].Content != longResult {
+		t.Errorf("expected latest tool result preserved, got: %s", result[3].Content[:min(50, len(result[3].Content))])
 	}
 }
 
@@ -482,9 +485,16 @@ func TestPruneToolResults_RatioCalculation(t *testing.T) {
 
 			for i := 1; i < len(result); i++ {
 				if result[i].Role == openai.ChatMessageRoleTool {
+					isLatest := i == len(result)-1
 					if tt.expectHardClear {
-						if result[i].Content != "[HARD]" {
-							t.Errorf("expected hard clear for tool result %d", i)
+						if isLatest && tt.numToolResults > 1 {
+							if result[i].Content == "[HARD]" {
+								t.Errorf("expected latest tool result %d to be preserved, but it was hard-cleared", i)
+							}
+						} else if !isLatest || tt.numToolResults == 1 {
+							if result[i].Content != "[HARD]" {
+								t.Errorf("expected hard clear for tool result %d", i)
+							}
 						}
 					} else if tt.expectTrimmed {
 						if result[i].Content == tt.toolContent && len(tt.toolContent) > 300 {
@@ -1475,8 +1485,16 @@ func TestPruneToolResults_AllMessagesAreToolResults(t *testing.T) {
 	result := agent.pruneToolResults(history)
 
 	for i, m := range result {
-		if m.Role == openai.ChatMessageRoleTool && m.Content != "[HARD]" {
-			t.Errorf("expected hard clear for all-tool-result history at index %d, got: %s", i, m.Content[:min(50, len(m.Content))])
+		if m.Role == openai.ChatMessageRoleTool {
+			if i == len(result)-1 {
+				if m.Content == "[HARD]" {
+					t.Errorf("expected latest tool result to be preserved at index %d, but it was hard-cleared", i)
+				}
+			} else {
+				if m.Content != "[HARD]" {
+					t.Errorf("expected hard clear for all-tool-result history at index %d, got: %s", i, m.Content[:min(50, len(m.Content))])
+				}
+			}
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -46,8 +47,27 @@ type FlightSearchResult struct {
 	Fastest  string   `json:"fastest,omitempty"`
 }
 
+type cacheEntry struct {
+	result      string
+	cachedAt    time.Time
+	origin      string
+	dest        string
+	date        string
+	flightCount int
+}
+
 type MomondoFlightTool struct {
 	progressCb func(string)
+	cache      map[string]cacheEntry
+	cacheMu    sync.RWMutex
+	cacheTTL   time.Duration
+}
+
+func NewMomondoFlightTool() *MomondoFlightTool {
+	return &MomondoFlightTool{
+		cache:    make(map[string]cacheEntry),
+		cacheTTL: 60 * time.Minute,
+	}
 }
 
 func (t *MomondoFlightTool) SetProgressCallback(cb func(string)) {
@@ -58,6 +78,46 @@ func (t *MomondoFlightTool) progress(msg string) {
 	if t.progressCb != nil {
 		t.progressCb(msg)
 	}
+}
+
+func (t *MomondoFlightTool) cacheKey(origin, dest, date string) string {
+	return fmt.Sprintf("%s-%s-%s", origin, dest, date)
+}
+
+func (t *MomondoFlightTool) getCached(key string) (string, bool) {
+	t.cacheMu.RLock()
+	defer t.cacheMu.RUnlock()
+	entry, ok := t.cache[key]
+	if !ok {
+		return "", false
+	}
+	if time.Since(entry.cachedAt) > t.cacheTTL {
+		return "", false
+	}
+	return entry.result, true
+}
+
+func (t *MomondoFlightTool) setCache(key, result, origin, dest, date string, flightCount int) {
+	t.cacheMu.Lock()
+	defer t.cacheMu.Unlock()
+	t.cache[key] = cacheEntry{
+		result:      result,
+		cachedAt:    time.Now(),
+		origin:      origin,
+		dest:        dest,
+		date:        date,
+		flightCount: flightCount,
+	}
+}
+
+func (t *MomondoFlightTool) getCacheEntryAge(key string) time.Time {
+	t.cacheMu.RLock()
+	defer t.cacheMu.RUnlock()
+	entry, ok := t.cache[key]
+	if !ok {
+		return time.Time{}
+	}
+	return entry.cachedAt
 }
 
 func (t *MomondoFlightTool) Name() string { return "search_flights" }
@@ -112,6 +172,16 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 			adults = v
 		}
 	}
+
+	cacheKey := t.cacheKey(params.Origin, params.Destination, params.Date)
+	if cached, ok := t.getCached(cacheKey); ok {
+		age := time.Since(t.getCacheEntryAge(cacheKey))
+		log.Printf("[Momondo] Cache HIT for %s (age: %v)", cacheKey, age.Round(time.Second))
+		t.progress(fmt.Sprintf("📦 Using cached results for %s → %s on %s (%v old)", params.Origin, params.Destination, params.Date, age.Round(time.Minute)))
+		return cached, nil
+	}
+
+	log.Printf("[Momondo] Cache MISS for %s, performing live search", cacheKey)
 
 	sortBy := "best"
 	if params.Sort == "price" || params.Sort == "cheapest" {
@@ -221,6 +291,11 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 		return fmt.Sprintf("No structured flight results found. Page preview:\n%s", preview), nil
 	}
 
+	if len(flights) > 5 {
+		log.Printf("[Momondo] Trimming %d flights to top 5", len(flights))
+		flights = flights[:5]
+	}
+
 	result := FlightSearchResult{
 		Query:   fmt.Sprintf("%s → %s on %s (%d adults)", params.Origin, params.Destination, params.Date, adults),
 		URL:     targetURL,
@@ -289,6 +364,8 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 	} else {
 		log.Printf("[Momondo] Price history saved: %s→%s %s, %d flights", entry.Origin, entry.Destination, entry.Date, entry.Count)
 	}
+
+	t.setCache(cacheKey, sb.String(), params.Origin, params.Destination, params.Date, result.Count)
 
 	t.progress(fmt.Sprintf("✅ Done! Found %d flights, cheapest: %s", result.Count, result.Cheapest))
 

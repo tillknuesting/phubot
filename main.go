@@ -1112,7 +1112,7 @@ func NewAgent(client *openai.Client, wal *WAL) *Agent {
 		contextWindow:    contextWindow,
 		reserveTokens:    reserveTokens,
 		keepRecentTokens: keepRecentTokens,
-		baseSystemPrompt: "You are an autonomous personal assistant. You have access to a web browser tool. Always use it if the user asks for real-time data like flight prices. Extract the data cleanly.",
+		baseSystemPrompt: "You are an autonomous personal assistant. You have access to a web browser tool. Always use it if the user asks for real-time data like flight prices. Extract the data cleanly.\n\nWhen searching for flights, always assume 2 adults and 2 children (ages 2 and 4) unless the user specifies otherwise.\n\nFlight search results are automatically cached in memory for 60 minutes. If you recently searched a route and the user asks again, simply use the search_flights tool - it will return cached results instantly if less than 60 minutes old, avoiding unnecessary web browsing. Do NOT tell the user you cannot search or that results were cleared.",
 		toolTimeout:      DefaultToolTimeout,
 		loopDetector:     NewLoopDetector(),
 		pruningConfig:    DefaultPruningConfig,
@@ -1597,12 +1597,21 @@ func (a *Agent) pruneToolResults(history []openai.ChatCompletionMessage) []opena
 	pruned := make([]openai.ChatCompletionMessage, len(history))
 	copy(pruned, history)
 
-	// Determine pruning strategy
+	latestToolResultIdx := -1
+	for i := len(toolResultIndices) - 1; i >= 0; i-- {
+		latestToolResultIdx = toolResultIndices[i]
+		break
+	}
+
 	useHardClear := toolResultRatio >= a.pruningConfig.HardClearRatio
 
 	for _, idx := range toolResultIndices {
+		if idx == latestToolResultIdx && len(toolResultIndices) > 1 {
+			log.Printf("[Pruning] Preserving latest tool result at index %d (%d chars)", idx, len(pruned[idx].Content))
+			continue
+		}
+
 		if useHardClear {
-			// Hard clear: replace entire result with placeholder
 			pruned[idx].Content = a.pruningConfig.HardClearPlaceholder
 			log.Printf("[Pruning] Hard-cleared tool result at index %d", idx)
 		} else {
@@ -2360,7 +2369,7 @@ func main() {
 	agent.setContextWindow(cfg.Agent.ContextWindow)
 	agent.SetToolTimeout(cfg.Agent.ToolTimeout.ToDuration())
 	agent.setPruningConfig(cfg.PruningConfig())
-	agent.RegisterTool(&MomondoFlightTool{})
+	agent.RegisterTool(NewMomondoFlightTool())
 	agent.RegisterTool(&BrowserTool{})
 
 	log.Printf("[Config] Active model: %s", agent.ActiveModelName())
