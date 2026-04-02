@@ -36,6 +36,7 @@ type Flight struct {
 	TotalFloat   float64 `json:"total_float"`
 	FareClass    string  `json:"fare_class,omitempty"`
 	Label        string  `json:"label,omitempty"`
+	Aircraft     string  `json:"aircraft,omitempty"`
 }
 
 type FlightSearchResult struct {

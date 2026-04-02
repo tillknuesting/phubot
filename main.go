@@ -2482,6 +2482,7 @@ func main() {
 	agent.setPruningConfig(cfg.PruningConfig())
 	agent.RegisterTool(NewMomondoFlightTool(cfg.Agent.Headless))
 	agent.RegisterTool(NewBrowserTool(cfg.Agent.Headless))
+	agent.RegisterTool(NewIdentifyAircraftTool(cfg.Agent.Headless))
 
 	agent.mu.RLock()
 	mi := agent.maxIterations
