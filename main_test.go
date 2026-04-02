@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -264,6 +265,7 @@ func TestChat_CircuitBreaker(t *testing.T) {
 	defer server.Close()
 
 	agent := NewAgent(client, nil)
+	agent.SetMaxIterations(5)
 	agent.RegisterTool(&MockTool{name: "loop_tool"})
 
 	_, err := agent.Chat(context.Background(), "trigger loop")
@@ -1888,6 +1890,7 @@ func TestChat_CircuitBreakerExactBoundary(t *testing.T) {
 	defer server.Close()
 
 	agent := NewAgent(client, nil)
+	agent.SetMaxIterations(5)
 	agent.RegisterTool(&MockTool{name: "boundary_tool"})
 
 	_, err := agent.Chat(context.Background(), "loop exactly 5 times")
@@ -5594,4 +5597,433 @@ func TestAgent_SwitchModel_PreservesClient(t *testing.T) {
 	if c != client1 {
 		t.Error("expected client to be switched back to client1")
 	}
+}
+
+// ==========================================
+// MULTI-DATE FLIGHT SEARCH (8 dates)
+// ==========================================
+
+func TestChat_MultiDateFlightSearch_AllCallsSucceed(t *testing.T) {
+	dates := []string{"2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06", "2026-04-07", "2026-04-08"}
+	callCount := 0
+	toolCallCount := 0
+
+	server, client := createMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+
+		if callCount <= len(dates) {
+			args, _ := json.Marshal(map[string]string{
+				"origin":      "HKT",
+				"destination": "KUL",
+				"date":        dates[callCount-1],
+			})
+			resp := openai.ChatCompletionResponse{
+				Choices: []openai.ChatCompletionChoice{
+					{
+						Message: openai.ChatCompletionMessage{
+							Role: openai.ChatMessageRoleAssistant,
+							ToolCalls: []openai.ToolCall{
+								{
+									ID:   fmt.Sprintf("call_%d", callCount),
+									Type: openai.ToolTypeFunction,
+									Function: openai.FunctionCall{
+										Name:      "search_flights",
+										Arguments: string(args),
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		} else {
+			resp := openai.ChatCompletionResponse{
+				Choices: []openai.ChatCompletionChoice{
+					{
+						Message: openai.ChatCompletionMessage{
+							Role:    openai.ChatMessageRoleAssistant,
+							Content: "The cheapest flight across all dates is on April 3rd for 59 EUR.",
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		}
+	})
+	defer server.Close()
+
+	agent := NewAgent(client, nil)
+	agent.RegisterTool(&MockTool{
+		name: "search_flights",
+		executeFn: func(args string) (string, error) {
+			toolCallCount++
+			var params struct {
+				Date string `json:"date"`
+			}
+			json.Unmarshal([]byte(args), &params)
+			return fmt.Sprintf("Found 3 flights for %s. Cheapest: AirAsia 59 EUR", params.Date), nil
+		},
+	})
+
+	reply, err := agent.Chat(context.Background(), "Find cheapest flight HKT to KUL next 8 days")
+	if err != nil {
+		t.Fatalf("expected success after 8 tool calls, got error: %v", err)
+	}
+	if !strings.Contains(reply, "April 3rd") {
+		t.Fatalf("expected final summary reply, got: %s", reply)
+	}
+	if toolCallCount != 8 {
+		t.Fatalf("expected 8 tool calls (one per date), got %d", toolCallCount)
+	}
+	if callCount != 9 {
+		t.Fatalf("expected 9 LLM calls (8 tool + 1 final), got %d", callCount)
+	}
+}
+
+func TestChat_ConfigurableMaxIterations(t *testing.T) {
+	callCount := 0
+	server, client := createMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		args, _ := json.Marshal(map[string]string{"x": "y"})
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatCompletionChoice{
+				{
+					Message: openai.ChatCompletionMessage{
+						Role: openai.ChatMessageRoleAssistant,
+						ToolCalls: []openai.ToolCall{
+							{
+								ID:   fmt.Sprintf("call_%d", callCount),
+								Type: openai.ToolTypeFunction,
+								Function: openai.FunctionCall{
+									Name:      "loop_tool",
+									Arguments: string(args),
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+	defer server.Close()
+
+	agent := NewAgent(client, nil)
+	agent.SetMaxIterations(3)
+	agent.RegisterTool(&MockTool{name: "loop_tool"})
+
+	_, err := agent.Chat(context.Background(), "trigger loop")
+	if err == nil {
+		t.Fatal("expected circuit breaker error")
+	}
+	if !strings.Contains(err.Error(), "circuit breaker") {
+		t.Fatalf("expected circuit breaker error, got: %v", err)
+	}
+	if callCount != 3 {
+		t.Fatalf("expected exactly 3 iterations with custom limit, got %d", callCount)
+	}
+}
+
+// ==========================================
+// LOOP DETECTOR: VARIED RESULTS SHOULD NOT TRIGGER
+// ==========================================
+
+func TestLoopDetector_SimilarArgsDifferentResults_NoLoop(t *testing.T) {
+	ld := NewLoopDetector()
+
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-01"}`, "Found 3 flights. Cheapest: AirAsia 59 EUR")
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-02"}`, "Found 2 flights. Cheapest: Batik Air 72 EUR")
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-03"}`, "Found 4 flights. Cheapest: AirAsia 55 EUR")
+
+	isLoop, hint := ld.detectLoop("search_flights", `{"query": "flights HKT to KUL date 2026-04-04"}`)
+	if isLoop {
+		t.Fatalf("should NOT detect loop for different-date flight searches with different results: %s", hint)
+	}
+}
+
+func TestLoopDetector_SimilarArgsAllErrors_Loop(t *testing.T) {
+	ld := NewLoopDetector()
+
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-01"}`, "Error: timeout")
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-02"}`, "Error: timeout")
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-03"}`, "Error: connection failed")
+
+	isLoop, hint := ld.detectLoop("search_flights", `{"query": "flights HKT to KUL date 2026-04-04"}`)
+	if !isLoop {
+		t.Fatal("should detect loop when all similar calls produced errors")
+	}
+	if !strings.Contains(hint, "LOOP DETECTED") {
+		t.Fatalf("hint should contain LOOP DETECTED: %s", hint)
+	}
+}
+
+func TestLoopDetector_SimilarArgsIdenticalResults_Loop(t *testing.T) {
+	ld := NewLoopDetector()
+
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-01"}`, "Found 3 flights. Cheapest: AirAsia 59 EUR")
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-02"}`, "Found 3 flights. Cheapest: AirAsia 59 EUR")
+	ld.record("search_flights", `{"query": "flights HKT to KUL date 2026-04-03"}`, "Found 3 flights. Cheapest: AirAsia 59 EUR")
+
+	isLoop, hint := ld.detectLoop("search_flights", `{"query": "flights HKT to KUL date 2026-04-04"}`)
+	if !isLoop {
+		t.Fatal("should detect loop when similar calls produce identical results")
+	}
+	if !strings.Contains(hint, "LOOP DETECTED") {
+		t.Fatalf("hint should contain LOOP DETECTED: %s", hint)
+	}
+}
+
+func TestAllResultsAreErrorsOrIdentical(t *testing.T) {
+	tests := []struct {
+		name     string
+		records  []toolCallRecord
+		expected bool
+	}{
+		{
+			name:     "empty",
+			records:  nil,
+			expected: false,
+		},
+		{
+			name: "all errors",
+			records: []toolCallRecord{
+				{result: "Error: timeout"},
+				{result: "Error: failed"},
+			},
+			expected: true,
+		},
+		{
+			name: "all identical results",
+			records: []toolCallRecord{
+				{result: "Found 3 flights"},
+				{result: "Found 3 flights"},
+				{result: "Found 3 flights"},
+			},
+			expected: true,
+		},
+		{
+			name: "mixed different results",
+			records: []toolCallRecord{
+				{result: "Found 3 flights. Cheapest: 59 EUR"},
+				{result: "Found 2 flights. Cheapest: 72 EUR"},
+				{result: "Found 4 flights. Cheapest: 55 EUR"},
+			},
+			expected: false,
+		},
+		{
+			name: "one error, rest different",
+			records: []toolCallRecord{
+				{result: "Error: timeout"},
+				{result: "Found 2 flights. Cheapest: 72 EUR"},
+				{result: "Found 4 flights. Cheapest: 55 EUR"},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := allResultsAreErrorsOrIdentical(tt.records)
+			if result != tt.expected {
+				t.Errorf("allResultsAreErrorsOrIdentical(%v) = %v, want %v", tt.name, result, tt.expected)
+			}
+		})
+	}
+}
+
+// ==========================================
+// COMPACT IN BACKGROUND
+// ==========================================
+
+func TestCompactInBackground_DoesNotBlock(t *testing.T) {
+	agent := NewAgent(nil, nil)
+	agent.mu.Lock()
+	agent.contextWindow = 128000
+	agent.reserveTokens = int(float64(agent.contextWindow) * ReserveTokensRatio)
+	agent.keepRecentTokens = int(float64(agent.contextWindow) * KeepRecentTokensRatio)
+	agent.history = []openai.ChatCompletionMessage{
+		{Role: openai.ChatMessageRoleSystem, Content: "system"},
+		{Role: openai.ChatMessageRoleUser, Content: "hi"},
+		{Role: openai.ChatMessageRoleAssistant, Content: "hello"},
+	}
+	agent.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		agent.CompactInBackground(context.Background())
+	}()
+
+	select {
+	case <-done:
+		return
+	case <-time.After(2 * time.Second):
+		t.Fatal("CompactInBackground should return quickly, not block")
+	}
+}
+
+func TestCompactInBackground_NoopOnSmallHistory(t *testing.T) {
+	agent := NewAgent(nil, nil)
+	agent.mu.Lock()
+	agent.contextWindow = 128000
+	agent.reserveTokens = int(128000 * 0.5)
+	agent.keepRecentTokens = int(128000 * 0.6)
+	agent.history = []openai.ChatCompletionMessage{
+		{Role: openai.ChatMessageRoleSystem, Content: "system"},
+	}
+	agent.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		agent.CompactInBackground(context.Background())
+	}()
+
+	select {
+	case <-done:
+		return
+	case <-time.After(time.Second):
+		t.Fatal("CompactInBackground should not start goroutine for small history")
+	}
+}
+
+func TestCompactInBackground_TriggersOnLargeHistory(t *testing.T) {
+	var llmCalled int32
+
+	server, client := createMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&llmCalled, 1)
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatCompletionChoice{
+				{
+					Message: openai.ChatCompletionMessage{
+						Role:    openai.ChatMessageRoleAssistant,
+						Content: "Summary of conversation",
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+	defer server.Close()
+
+	agent := NewAgent(client, nil)
+	agent.mu.Lock()
+	agent.contextWindow = 1000
+	agent.reserveTokens = int(1000 * 0.5)
+	agent.keepRecentTokens = int(1000 * 0.6)
+	agent.history = []openai.ChatCompletionMessage{
+		{Role: openai.ChatMessageRoleSystem, Content: "system"},
+	}
+	agent.mu.Unlock()
+
+	for i := range 20 {
+		agent.mu.Lock()
+		agent.history = append(agent.history, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleUser,
+			Content: fmt.Sprintf("This is message number %d with lots of text to fill up the context. Lorem ipsum dolor sit amet consectetur adipiscing elit.", i),
+		})
+		agent.history = append(agent.history, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleAssistant,
+			Content: fmt.Sprintf("Response to message %d with lots of text to fill up context. Lorem ipsum dolor sit amet consectetur adipiscing elit.", i),
+		})
+		agent.mu.Unlock()
+	}
+
+	agent.mu.RLock()
+	histLen := len(agent.history)
+	agent.mu.RUnlock()
+
+	agent.CompactInBackground(context.Background())
+
+	time.Sleep(500 * time.Millisecond)
+
+	agent.mu.RLock()
+	newHistLen := len(agent.history)
+	agent.mu.RUnlock()
+
+	if newHistLen >= histLen {
+		t.Fatalf("expected history to be compacted, but stayed at %d messages", histLen)
+	}
+	t.Logf("History compacted: %d -> %d messages", histLen, newHistLen)
+
+	calls := atomic.LoadInt32(&llmCalled)
+	if calls == 0 {
+		t.Fatal("Expected LLM to be called for compaction summary generation")
+	}
+}
+
+// ==========================================
+// DEFAULT CONFIG VALUES
+// ==========================================
+
+func TestDefaultConfigValues(t *testing.T) {
+	if DefaultContextWindow != 128000 {
+		t.Errorf("DefaultContextWindow = %d, want 128000", DefaultContextWindow)
+	}
+	if DefaultMaxIterations != 100 {
+		t.Errorf("DefaultMaxIterations = %d, want 100", DefaultMaxIterations)
+	}
+	if ReserveTokensRatio != 0.50 {
+		t.Errorf("ReserveTokensRatio = %f, want 0.50", ReserveTokensRatio)
+	}
+	if KeepRecentTokensRatio != 0.60 {
+		t.Errorf("KeepRecentTokensRatio = %f, want 0.60", KeepRecentTokensRatio)
+	}
+}
+
+func TestNewAgent_DefaultCompactionThresholds(t *testing.T) {
+	agent := NewAgent(nil, nil)
+	agent.mu.RLock()
+	reserve := agent.reserveTokens
+	keepRecent := agent.keepRecentTokens
+	ctx := agent.contextWindow
+	maxIter := agent.maxIterations
+	agent.mu.RUnlock()
+
+	expectedReserve := int(float64(DefaultContextWindow) * ReserveTokensRatio)
+	expectedKeep := int(float64(DefaultContextWindow) * KeepRecentTokensRatio)
+
+	if ctx != DefaultContextWindow {
+		t.Errorf("contextWindow = %d, want %d", ctx, DefaultContextWindow)
+	}
+	if reserve != expectedReserve {
+		t.Errorf("reserveTokens = %d, want %d (50%% of %d)", reserve, expectedReserve, DefaultContextWindow)
+	}
+	if keepRecent != expectedKeep {
+		t.Errorf("keepRecentTokens = %d, want %d (60%% of %d)", keepRecent, expectedKeep, DefaultContextWindow)
+	}
+	if maxIter != DefaultMaxIterations {
+		t.Errorf("maxIterations = %d, want %d", maxIter, DefaultMaxIterations)
+	}
+}
+
+func TestCompactInBackground_CalledAfterChatDoesNotCrash(t *testing.T) {
+	server, client := createMockLLMServer(func(w http.ResponseWriter, r *http.Request) {
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatCompletionChoice{
+				{
+					Message: openai.ChatCompletionMessage{
+						Role:    openai.ChatMessageRoleAssistant,
+						Content: "done",
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+	defer server.Close()
+
+	agent := NewAgent(client, nil)
+
+	reply, err := agent.Chat(context.Background(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "done" {
+		t.Fatalf("expected 'done', got %q", reply)
+	}
+
+	agent.CompactInBackground(context.Background())
+	time.Sleep(100 * time.Millisecond)
 }

@@ -9,6 +9,11 @@ import (
 )
 
 func TestLoadConfig_FileNotFound(t *testing.T) {
+	origDir, _ := os.Getwd()
+	tmpDir := t.TempDir()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origDir)
+
 	cfg, path, err := findAndLoadConfig("")
 	if err != nil {
 		t.Fatalf("expected no error for auto-discovery with no file, got: %v", err)
@@ -114,7 +119,7 @@ func TestLoadConfig_PartialOverride(t *testing.T) {
 	if cfg.LLM.BaseURL != "http://127.0.0.1:1234/v1" {
 		t.Errorf("expected default base URL for unset field, got %q", cfg.LLM.BaseURL)
 	}
-	if cfg.Agent.ContextWindow != 40000 {
+	if cfg.Agent.ContextWindow != 128000 {
 		t.Errorf("expected default context window, got %d", cfg.Agent.ContextWindow)
 	}
 }
@@ -277,6 +282,11 @@ func TestFindAndLoadConfig_ExplicitPath(t *testing.T) {
 }
 
 func TestFindAndLoadConfig_NoFile(t *testing.T) {
+	origDir, _ := os.Getwd()
+	tmpDir := t.TempDir()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origDir)
+
 	cfg, path, err := findAndLoadConfig("")
 	if err != nil {
 		t.Fatal(err)

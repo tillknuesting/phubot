@@ -498,6 +498,7 @@ func TestIntegration_CircuitBreaker(t *testing.T) {
 	defer server.Close()
 
 	agent.RegisterTool(&MockTool{name: "loop_tool"})
+	agent.SetMaxIterations(5)
 
 	_, err := agent.Chat(context.Background(), "trigger loop")
 	if err == nil {

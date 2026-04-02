@@ -73,6 +73,7 @@ type AgentConfig struct {
 	KeepRecentRatio float64  `json:"keep_recent_ratio"`
 	PruningMode     string   `json:"pruning_mode"`
 	Headless        bool     `json:"headless"`
+	MaxIterations   int      `json:"max_iterations"`
 }
 
 type MemoryConfig struct {
@@ -97,12 +98,13 @@ var defaultConfig = Config{
 		AllowedUsers: "",
 	},
 	Agent: AgentConfig{
-		ContextWindow:   40000,
+		ContextWindow:   128000,
 		ToolTimeout:     Duration(30 * time.Second),
-		ReserveRatio:    0.70,
-		KeepRecentRatio: 0.85,
+		ReserveRatio:    0.50,
+		KeepRecentRatio: 0.60,
 		PruningMode:     "aggressive",
 		Headless:        false,
+		MaxIterations:   0,
 	},
 	Memory: MemoryConfig{
 		MaxSize:       100 * 1024,

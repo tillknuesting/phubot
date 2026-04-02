@@ -1215,14 +1215,14 @@ func TestNewAgent_WALWithoutSystem_AddsSystem(t *testing.T) {
 // ==========================================
 
 func TestContextWindowConstants(t *testing.T) {
-	if DefaultContextWindow != 40000 {
-		t.Errorf("DefaultContextWindow should be 40000, got %d", DefaultContextWindow)
+	if DefaultContextWindow != 128000 {
+		t.Errorf("DefaultContextWindow should be 128000, got %d", DefaultContextWindow)
 	}
-	if ReserveTokensRatio != 0.70 {
-		t.Errorf("ReserveTokensRatio should be 0.70, got %f", ReserveTokensRatio)
+	if ReserveTokensRatio != 0.50 {
+		t.Errorf("ReserveTokensRatio should be 0.50, got %f", ReserveTokensRatio)
 	}
-	if KeepRecentTokensRatio != 0.85 {
-		t.Errorf("KeepRecentTokensRatio should be 0.85, got %f", KeepRecentTokensRatio)
+	if KeepRecentTokensRatio != 0.60 {
+		t.Errorf("KeepRecentTokensRatio should be 0.60, got %f", KeepRecentTokensRatio)
 	}
 	if MemoryFlushThreshold != 4000 {
 		t.Errorf("MemoryFlushThreshold should be 4000, got %d", MemoryFlushThreshold)
@@ -1234,11 +1234,12 @@ func TestReserveTokens_CalculatedCorrectly(t *testing.T) {
 		contextWindow int
 		expected      int
 	}{
-		{40000, 28000},
-		{10000, 7000},
-		{8000, 5600},
-		{768, 537},
-		{100000, 70000},
+		{128000, 64000},
+		{40000, 20000},
+		{10000, 5000},
+		{8000, 4000},
+		{768, 384},
+		{100000, 50000},
 	}
 
 	for _, tt := range tests {
@@ -1254,10 +1255,11 @@ func TestKeepRecentTokens_CalculatedCorrectly(t *testing.T) {
 		contextWindow int
 		expected      int
 	}{
-		{40000, 34000},
-		{10000, 8500},
-		{8000, 6800},
-		{768, 652},
+		{128000, 76800},
+		{40000, 24000},
+		{10000, 6000},
+		{8000, 4800},
+		{768, 460},
 	}
 
 	for _, tt := range tests {

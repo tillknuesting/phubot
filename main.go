@@ -141,17 +141,17 @@ const (
 	// DefaultContextWindow is the default context window size in tokens.
 	// This should match or be less than your model's actual context window.
 	// Default: 40000 tokens (suitable for most modern models)
-	DefaultContextWindow = 40000
+	DefaultContextWindow = 128000
 
 	// ReserveTokensRatio is the ratio of context window that triggers compaction.
 	// When tokens exceed (ContextWindow * ReserveTokensRatio), compaction starts.
-	// Default: 0.70 (70% of context window)
-	ReserveTokensRatio = 0.70
+	// Default: 0.50 (50% of context window — compact early to avoid latency spikes)
+	ReserveTokensRatio = 0.50
 
 	// KeepRecentTokensRatio is the ratio of context window reserved for recent messages.
 	// During compaction, this portion of recent context is always preserved.
-	// Default: 0.85 (85% of context window, more aggressive pruning of old messages)
-	KeepRecentTokensRatio = 0.85
+	// Default: 0.60 (60% of context window — aggressively prune old messages)
+	KeepRecentTokensRatio = 0.60
 
 	// MemoryFlushThreshold is the token count remaining when memory flush triggers.
 	// When (CurrentTokens > Reserve - MemoryFlushThreshold), flush memory before compaction.
@@ -177,6 +177,12 @@ const (
 	// This prevents excessive LLM calls for fact extraction during rapid conversation.
 	// Default: 5 seconds
 	CompactionMinDelay = 5 * time.Second
+
+	// DefaultMaxIterations is the maximum number of ReAct loop iterations.
+	// This is the circuit breaker limit. After this many LLM round-trips,
+	// the agent stops and returns an error.
+	// Default: 15 (allows multi-step queries like searching flights across 8+ dates)
+	DefaultMaxIterations = 100
 
 	// SummaryPrompt is the instruction given to the LLM for summarizing old messages.
 	// It emphasizes preserving key facts while condensing the conversation.
@@ -949,6 +955,7 @@ type Agent struct {
 	summarizer       SummarizeFunc
 	baseSystemPrompt string
 	toolTimeout      time.Duration
+	maxIterations    int
 	loopDetector     *LoopDetector
 	pruningConfig    PruningConfig
 	progressCb       func(string)
@@ -1008,6 +1015,8 @@ func (ld *LoopDetector) record(toolName, args, result string) {
 // Detection Logic:
 //  1. Count exact matches (same tool + same args)
 //  2. Count similar matches (same tool + similar args)
+//     - BUT skip if previous similar calls produced different successful results
+//     (e.g., searching flights for different dates with different prices)
 //  3. If count >= loopThreshold, return hint for LLM
 //
 // The hint provides actionable advice based on whether previous
@@ -1038,18 +1047,56 @@ func (ld *LoopDetector) detectLoop(toolName, args string) (bool, string) {
 	}
 
 	// Check for similar matches (same tool, similar args)
-	similarCount := 0
+	// But only trigger if the previous similar calls all produced errors or identical results.
+	// Varied successful results (e.g., different dates returning different flights) are NOT a loop.
+	var similarRecords []toolCallRecord
 	for _, call := range ld.recentToolCalls {
-		if call.toolName == toolName && similarity(call.args, args) > 0.8 {
-			similarCount++
+		if call.toolName == toolName {
+			s := similarity(call.args, args)
+			if s > 0.8 {
+				similarRecords = append(similarRecords, call)
+			}
 		}
 	}
 
-	if similarCount >= ld.loopThreshold {
-		return true, fmt.Sprintf("[LOOP DETECTED] You've called %q with very similar arguments %d times. Try a completely different approach.", toolName, similarCount)
+	if len(similarRecords) >= ld.loopThreshold {
+		if allResultsAreErrorsOrIdentical(similarRecords) {
+			log.Printf("[LoopDetector] Similar-args loop detected for %q: %d similar calls with errors/identical results", toolName, len(similarRecords))
+			return true, fmt.Sprintf("[LOOP DETECTED] You've called %q with very similar arguments %d times. Try a completely different approach.", toolName, len(similarRecords))
+		}
+		log.Printf("[LoopDetector] [DEBUG] %d similar calls to %q but results differ — allowing (not a loop)", len(similarRecords), toolName)
 	}
 
 	return false, ""
+}
+
+// allResultsAreErrorsOrIdentical returns true if all records are errors or
+// have identical result content. This distinguishes a true loop (repeating
+// the same failing call) from a legitimate multi-call pattern (e.g., searching
+// flights for different dates where each call returns different results).
+func allResultsAreErrorsOrIdentical(records []toolCallRecord) bool {
+	if len(records) == 0 {
+		return false
+	}
+
+	allErrors := true
+	seen := make(map[string]bool)
+	hasUnique := false
+
+	for _, r := range records {
+		isErr := strings.Contains(r.result, "Error") || strings.Contains(r.result, "failed") || strings.Contains(r.result, "No structured flight results")
+		if !isErr {
+			allErrors = false
+		}
+		if !seen[r.result] {
+			seen[r.result] = true
+			if len(seen) > 1 {
+				hasUnique = true
+			}
+		}
+	}
+
+	return allErrors || !hasUnique
 }
 
 // similarity calculates the Jaccard similarity between two strings based on word overlap.
@@ -1119,6 +1166,7 @@ func NewAgent(client *openai.Client, wal *WAL) *Agent {
 		keepRecentTokens: keepRecentTokens,
 		baseSystemPrompt: "You are an autonomous personal assistant. You have access to a web browser tool. Always use it if the user asks for real-time data like flight prices. Extract the data cleanly.\n\nWhen searching for flights, always assume 2 adults and 2 children (ages 2 and 4) unless the user specifies otherwise.\n\nFlight search results are automatically cached in memory for 60 minutes. If you recently searched a route and the user asks again, simply use the search_flights tool - it will return cached results instantly if less than 60 minutes old, avoiding unnecessary web browsing. Do NOT tell the user you cannot search or that results were cleared.",
 		toolTimeout:      DefaultToolTimeout,
+		maxIterations:    DefaultMaxIterations,
 		loopDetector:     NewLoopDetector(),
 		pruningConfig:    DefaultPruningConfig,
 	}
@@ -1213,6 +1261,14 @@ func (a *Agent) SetToolTimeout(timeout time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.toolTimeout = timeout
+}
+
+func (a *Agent) SetMaxIterations(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n > 0 {
+		a.maxIterations = n
+	}
 }
 
 func (a *Agent) setModel(model string) {
@@ -1432,6 +1488,36 @@ func (a *Agent) generateSummary(ctx context.Context, messages []openai.ChatCompl
 		return fmt.Sprintf("Summary generation failed. %d messages were compacted.", len(messages))
 	}
 	return summary
+}
+
+func (a *Agent) CompactInBackground(ctx context.Context) {
+	a.mu.RLock()
+	historyLen := len(a.history)
+	reserve := a.reserveTokens
+	a.mu.RUnlock()
+
+	if historyLen < 4 || reserve <= 0 {
+		return
+	}
+
+	a.mu.RLock()
+	currentTokens := countTokens(a.history)
+	a.mu.RUnlock()
+
+	if currentTokens < reserve-MemoryFlushThreshold {
+		return
+	}
+
+	go func() {
+		log.Printf("[Compaction] Background compaction starting (%d tokens, reserve %d)", currentTokens, reserve)
+		bgCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := a.compactHistoryIfNeeded(bgCtx); err != nil {
+			log.Printf("[Compaction] Background compaction failed: %v", err)
+		} else {
+			log.Printf("[Compaction] Background compaction completed")
+		}
+	}()
 }
 
 func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
@@ -1682,7 +1768,22 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 	// NEW: Prune tool results before sending to LLM (Tier 1)
 	historyCopy = a.pruneToolResults(historyCopy)
 
-	for range 5 {
+	a.mu.RLock()
+	maxIter := a.maxIterations
+	a.mu.RUnlock()
+	if maxIter <= 0 {
+		maxIter = DefaultMaxIterations
+	}
+
+	cumulativeToolCalls := 0
+
+	for iter := range maxIter {
+		log.Printf("[Chat] ReAct iteration %d/%d (cumulative tool calls: %d)", iter+1, maxIter, cumulativeToolCalls)
+
+		if iter >= maxIter-2 && iter > 0 {
+			log.Printf("[Chat] [DEBUG] Approaching circuit breaker limit (iteration %d/%d)", iter+1, maxIter)
+		}
+
 		req := openai.ChatCompletionRequest{
 			Model:    a.model,
 			Messages: historyCopy,
@@ -1711,6 +1812,7 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 		}
 
 		log.Printf("[Chat] Model requested %d tool call(s)", len(msg.ToolCalls))
+		cumulativeToolCalls += len(msg.ToolCalls)
 		a.appendHistory(msg)
 		historyCopy = append(historyCopy, msg)
 
@@ -1816,7 +1918,8 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 		historyCopy = a.pruneToolResults(historyCopy)
 	}
 
-	return "", fmt.Errorf("agent reached maximum thinking steps (circuit breaker triggered)")
+	log.Printf("[Chat] Circuit breaker triggered after %d iterations, %d cumulative tool calls", maxIter, cumulativeToolCalls)
+	return "", fmt.Errorf("agent reached maximum thinking steps (circuit breaker: %d iterations, %d tool calls)", maxIter, cumulativeToolCalls)
 }
 
 func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 string) (string, error) {
@@ -2373,11 +2476,17 @@ func main() {
 	}
 	agent.setContextWindow(cfg.Agent.ContextWindow)
 	agent.SetToolTimeout(cfg.Agent.ToolTimeout.ToDuration())
+	if cfg.Agent.MaxIterations > 0 {
+		agent.SetMaxIterations(cfg.Agent.MaxIterations)
+	}
 	agent.setPruningConfig(cfg.PruningConfig())
 	agent.RegisterTool(NewMomondoFlightTool(cfg.Agent.Headless))
 	agent.RegisterTool(NewBrowserTool(cfg.Agent.Headless))
 
-	log.Printf("[Config] Active model: %s", agent.ActiveModelName())
+	agent.mu.RLock()
+	mi := agent.maxIterations
+	agent.mu.RUnlock()
+	log.Printf("[Config] Active model: %s, max iterations: %d", agent.ActiveModelName(), mi)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2491,5 +2600,6 @@ func main() {
 			continue
 		}
 		fmt.Printf("\nAgent: %s\n\n", reply)
+		agent.CompactInBackground(ctx)
 	}
 }
