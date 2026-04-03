@@ -128,6 +128,12 @@ var defaultConfig = Config{
 			APIKey:  "",
 			Model:   "glm-5.1",
 		},
+		{
+			Name:    "groq",
+			BaseURL: "https://api.groq.com/openai/v1",
+			APIKey:  "",
+			Model:   "qwen/qwen3-32b",
+		},
 	},
 }
 
@@ -168,6 +174,13 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("ALLOWED_USERS"); v != "" {
 		c.Telegram.AllowedUsers = v
+	}
+	if v := os.Getenv("GROQ_API_KEY"); v != "" {
+		for i := range c.Models {
+			if c.Models[i].Name == "groq" {
+				c.Models[i].APIKey = v
+			}
+		}
 	}
 }
 

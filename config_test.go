@@ -400,8 +400,8 @@ func TestConfig_DurationParsing(t *testing.T) {
 
 func TestConfig_DefaultModels(t *testing.T) {
 	cfg := defaultConfig
-	if len(cfg.Models) != 2 {
-		t.Fatalf("expected 2 default models, got %d", len(cfg.Models))
+	if len(cfg.Models) != 3 {
+		t.Fatalf("expected 3 default models, got %d", len(cfg.Models))
 	}
 	if cfg.Models[0].Name != "local" {
 		t.Errorf("expected first model 'local', got %q", cfg.Models[0].Name)
@@ -414,6 +414,15 @@ func TestConfig_DefaultModels(t *testing.T) {
 	}
 	if cfg.Models[1].Model != "glm-5.1" {
 		t.Errorf("expected glm5 model ID, got %q", cfg.Models[1].Model)
+	}
+	if cfg.Models[2].Name != "groq" {
+		t.Errorf("expected third model 'groq', got %q", cfg.Models[2].Name)
+	}
+	if cfg.Models[2].BaseURL != "https://api.groq.com/openai/v1" {
+		t.Errorf("expected groq base URL, got %q", cfg.Models[2].BaseURL)
+	}
+	if cfg.Models[2].Model != "qwen/qwen3-32b" {
+		t.Errorf("expected groq model ID, got %q", cfg.Models[2].Model)
 	}
 }
 
