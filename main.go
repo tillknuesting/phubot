@@ -2456,6 +2456,7 @@ func main() {
 	allowedUsers := flag.String("allowed", "", "Comma-separated Telegram user IDs (overrides config file)")
 	doInit := flag.Bool("init", false, "Create example config.json in current directory")
 	tuiMode := flag.Bool("tui", false, "Launch terminal UI monitor alongside bot")
+	demoMode := flag.Bool("demo", false, "Launch TUI with demo mock data")
 	flag.Parse()
 
 	if *doInit {
@@ -2541,7 +2542,7 @@ func main() {
 	if *tuiMode {
 		monitor = NewMonitor()
 		agent.monitor = monitor
-		RunMonitor(monitor)
+		RunMonitor(monitor, *demoMode)
 		log.Printf("[TUI] Monitor launched")
 	}
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,9 @@ func TestMonitorEmit_UserMsg(t *testing.T) {
 	if m.stats.totalMessages != 1 {
 		t.Errorf("expected 1 total message, got %d", m.stats.totalMessages)
 	}
+	if m.stats.agentPhase != "THINKING" {
+		t.Errorf("expected THINKING phase, got %q", m.stats.agentPhase)
+	}
 }
 
 func TestMonitorEmit_AssistantMsg(t *testing.T) {
@@ -50,6 +54,9 @@ func TestMonitorEmit_AssistantMsg(t *testing.T) {
 	defer m.mu.RUnlock()
 	if m.stats.totalMessages != 1 {
 		t.Errorf("expected 1 total message, got %d", m.stats.totalMessages)
+	}
+	if m.stats.agentPhase != "IDLE" {
+		t.Errorf("expected IDLE phase, got %q", m.stats.agentPhase)
 	}
 }
 
@@ -64,6 +71,9 @@ func TestMonitorEmit_ToolCall(t *testing.T) {
 	}
 	if m.stats.activeTool != "search_flights" {
 		t.Errorf("expected active tool 'search_flights', got %q", m.stats.activeTool)
+	}
+	if m.stats.agentPhase != "EXECUTING" {
+		t.Errorf("expected EXECUTING phase, got %q", m.stats.agentPhase)
 	}
 	ts, ok := m.tools["search_flights"]
 	if !ok {
@@ -99,6 +109,9 @@ func TestMonitorEmit_ToolCallAndResult(t *testing.T) {
 	if m.stats.activeTool != "" {
 		t.Errorf("expected no active tool after result, got %q", m.stats.activeTool)
 	}
+	if m.stats.agentPhase != "OBSERVING" {
+		t.Errorf("expected OBSERVING phase, got %q", m.stats.agentPhase)
+	}
 }
 
 func TestMonitorEmit_Error(t *testing.T) {
@@ -109,6 +122,9 @@ func TestMonitorEmit_Error(t *testing.T) {
 	defer m.mu.RUnlock()
 	if m.stats.totalErrors != 1 {
 		t.Errorf("expected 1 error, got %d", m.stats.totalErrors)
+	}
+	if len(m.stats.errors) != 1 || m.stats.errors[0] != "something broke" {
+		t.Errorf("expected error stored, got %v", m.stats.errors)
 	}
 }
 
@@ -152,8 +168,6 @@ func TestMonitorEmit_ChannelDelivery(t *testing.T) {
 
 func TestMonitorEmit_ChannelNonBlocking(t *testing.T) {
 	m := NewMonitor()
-	ch := m.ch
-	_ = ch
 	for range 300 {
 		m.Emit(MonitorEvent{Type: EventUserMsg, Message: "flood"})
 	}
@@ -225,6 +239,37 @@ func TestMonitorStatsCombined(t *testing.T) {
 	}
 }
 
+func TestMonitorTokenTracking(t *testing.T) {
+	m := NewMonitor()
+	m.Emit(MonitorEvent{Type: EventUserMsg, Message: "hello world"})
+	m.Emit(MonitorEvent{Type: EventToolCall, Tool: "t1", Detail: "arg1"})
+	m.Emit(MonitorEvent{Type: EventToolResult, Tool: "t1", Message: "result data"})
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.stats.promptTokens <= 0 {
+		t.Errorf("expected prompt tokens > 0, got %d", m.stats.promptTokens)
+	}
+	if m.stats.completionTokens <= 0 {
+		t.Errorf("expected completion tokens > 0, got %d", m.stats.completionTokens)
+	}
+	if m.stats.estimatedCost <= 0 {
+		t.Errorf("expected cost > 0, got %f", m.stats.estimatedCost)
+	}
+}
+
+func TestMonitorErrorBuffer(t *testing.T) {
+	m := NewMonitor()
+	for i := range 25 {
+		m.Emit(MonitorEvent{Type: EventError, Message: fmt.Sprintf("err%d", i)})
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.stats.errors) != 20 {
+		t.Errorf("expected 20 errors (capped), got %d", len(m.stats.errors))
+	}
+}
+
 func TestTruncStr(t *testing.T) {
 	tests := []struct {
 		input string
@@ -242,6 +287,21 @@ func TestTruncStr(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("truncStr(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.want)
 		}
+	}
+}
+
+func TestSmartTruncate(t *testing.T) {
+	result := smartTruncate("line1\nline2\nline3\nline4\nline5", 3, 200)
+	if strings.Count(result, "\n") > 3 {
+		t.Errorf("expected at most 3 lines, got: %q", result)
+	}
+	if !strings.Contains(result, "...") {
+		t.Errorf("expected truncation marker, got: %q", result)
+	}
+
+	short := smartTruncate("hello", 3, 200)
+	if short != "hello" {
+		t.Errorf("expected 'hello', got %q", short)
 	}
 }
 
@@ -264,44 +324,44 @@ func TestToolIcon(t *testing.T) {
 	}
 }
 
-func TestMonitorBuildLogContent_Empty(t *testing.T) {
+func TestBuildCoT_Empty(t *testing.T) {
 	m := NewMonitor()
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "Awaiting transmissions") {
 		t.Errorf("expected placeholder text, got: %q", content)
 	}
 }
 
-func TestMonitorBuildLogContent_UserMsg(t *testing.T) {
+func TestBuildCoT_UserMsg(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventUserMsg, Message: "find flights"})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "USER: find flights") {
 		t.Errorf("expected user message in log, got: %q", content)
 	}
 }
 
-func TestMonitorBuildLogContent_AssistantMsg(t *testing.T) {
+func TestBuildCoT_AssistantMsg(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventAssistantMsg, Message: "here are flights"})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "BOT: here are flights") {
 		t.Errorf("expected assistant message in log, got: %q", content)
 	}
 }
 
-func TestMonitorBuildLogContent_ToolCallWithDetail(t *testing.T) {
+func TestBuildCoT_ToolCallWithDetail(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventToolCall, Tool: "search_flights", Detail: "BOS->LAX"})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "CALL: search_flights") {
 		t.Errorf("expected tool call in log, got: %q", content)
 	}
@@ -310,12 +370,12 @@ func TestMonitorBuildLogContent_ToolCallWithDetail(t *testing.T) {
 	}
 }
 
-func TestMonitorBuildLogContent_ToolResultWithDuration(t *testing.T) {
+func TestBuildCoT_ToolResultWithDuration(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventToolResult, Tool: "search_flights", Message: "5 results", Duration: 2 * time.Second})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "DONE: search_flights") {
 		t.Errorf("expected tool result in log, got: %q", content)
 	}
@@ -324,46 +384,46 @@ func TestMonitorBuildLogContent_ToolResultWithDuration(t *testing.T) {
 	}
 }
 
-func TestMonitorBuildLogContent_Error(t *testing.T) {
+func TestBuildCoT_Error(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventError, Message: "timeout"})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "ERROR: timeout") {
 		t.Errorf("expected error in log, got: %q", content)
 	}
 }
 
-func TestMonitorBuildLogContent_Compaction(t *testing.T) {
+func TestBuildCoT_Compaction(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventCompaction, Message: "50 -> 10"})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "COMPACT: 50 -> 10") {
 		t.Errorf("expected compaction in log, got: %q", content)
 	}
 }
 
-func TestMonitorBuildLogContent_Progress(t *testing.T) {
+func TestBuildCoT_Progress(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventProgress, Message: "loading page"})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "loading page") {
 		t.Errorf("expected progress message in log, got: %q", content)
 	}
 }
 
-func TestMonitorBuildLogContent_LLMRequestResponse(t *testing.T) {
+func TestBuildCoT_LLMRequestResponse(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventLLMRequest})
 	m.Emit(MonitorEvent{Type: EventLLMResponse})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "LLM REQUEST") {
 		t.Errorf("expected LLM REQUEST in log, got: %q", content)
 	}
@@ -372,12 +432,12 @@ func TestMonitorBuildLogContent_LLMRequestResponse(t *testing.T) {
 	}
 }
 
-func TestMonitorBuildLogContent_System(t *testing.T) {
+func TestBuildCoT_System(t *testing.T) {
 	m := NewMonitor()
 	m.Emit(MonitorEvent{Type: EventSystem, Message: "started"})
-	model := newMonitorModel(m)
+	model := newMonitorModel(m, false)
 	model.monitor.stats.uptime = time.Now()
-	content := model.buildLogContent()
+	content := model.buildCoT()
 	if !strings.Contains(content, "SYS: started") {
 		t.Errorf("expected system message in log, got: %q", content)
 	}
@@ -413,4 +473,44 @@ func TestMonitorToolStateRunning(t *testing.T) {
 	if ts.lastCall.IsZero() {
 		t.Error("lastCall should not be zero")
 	}
+}
+
+func TestMonitorPhaseTransitions(t *testing.T) {
+	m := NewMonitor()
+
+	m.Emit(MonitorEvent{Type: EventUserMsg, Message: "hi"})
+	m.mu.RLock()
+	if m.stats.agentPhase != "THINKING" {
+		t.Errorf("after UserMsg: expected THINKING, got %q", m.stats.agentPhase)
+	}
+	m.mu.RUnlock()
+
+	m.Emit(MonitorEvent{Type: EventLLMRequest})
+	m.mu.RLock()
+	if m.stats.agentPhase != "THINKING" {
+		t.Errorf("after LLMRequest: expected THINKING, got %q", m.stats.agentPhase)
+	}
+	m.mu.RUnlock()
+
+	m.Emit(MonitorEvent{Type: EventLLMResponse})
+	m.Emit(MonitorEvent{Type: EventToolCall, Tool: "t1"})
+	m.mu.RLock()
+	if m.stats.agentPhase != "EXECUTING" {
+		t.Errorf("after ToolCall: expected EXECUTING, got %q", m.stats.agentPhase)
+	}
+	m.mu.RUnlock()
+
+	m.Emit(MonitorEvent{Type: EventToolResult, Tool: "t1"})
+	m.mu.RLock()
+	if m.stats.agentPhase != "OBSERVING" {
+		t.Errorf("after ToolResult: expected OBSERVING, got %q", m.stats.agentPhase)
+	}
+	m.mu.RUnlock()
+
+	m.Emit(MonitorEvent{Type: EventAssistantMsg, Message: "done"})
+	m.mu.RLock()
+	if m.stats.agentPhase != "IDLE" {
+		t.Errorf("after AssistantMsg: expected IDLE, got %q", m.stats.agentPhase)
+	}
+	m.mu.RUnlock()
 }
