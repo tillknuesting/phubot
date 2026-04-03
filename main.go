@@ -2408,6 +2408,7 @@ func main() {
 	telegramToken := flag.String("telegram", "", "Telegram bot token (overrides config file)")
 	allowedUsers := flag.String("allowed", "", "Comma-separated Telegram user IDs (overrides config file)")
 	doInit := flag.Bool("init", false, "Create example config.json in current directory")
+	modelFlag := flag.String("model", "", "Select active model by name (overrides config file)")
 	flag.Parse()
 
 	if *doInit {
@@ -2478,6 +2479,12 @@ func main() {
 	agent.activeModel = "local"
 	if len(cfg.Models) > 0 {
 		agent.activeModel = cfg.Models[0].Name
+	}
+	if *modelFlag != "" {
+		if err := agent.SwitchModel(*modelFlag); err != nil {
+			log.Fatalf("Failed to set model %q: %v", *modelFlag, err)
+		}
+		log.Printf("[Config] Model set to %q via -model flag", *modelFlag)
 	}
 	agent.setContextWindow(cfg.Agent.ContextWindow)
 	agent.SetToolTimeout(cfg.Agent.ToolTimeout.ToDuration())
