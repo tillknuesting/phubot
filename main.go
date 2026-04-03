@@ -959,7 +959,6 @@ type Agent struct {
 	loopDetector     *LoopDetector
 	pruningConfig    PruningConfig
 	progressCb       func(string)
-	monitor          *Monitor
 }
 
 // LoopDetector identifies when the LLM is stuck in a repetitive tool call pattern.
@@ -1634,9 +1633,6 @@ func (a *Agent) compactHistoryIfNeeded(ctx context.Context) error {
 	}
 
 	log.Printf("[Compaction] Reduced from %d to %d messages (%d tokens)", beforeCount, len(a.history), countTokens(a.history))
-	if a.monitor != nil {
-		a.monitor.Emit(MonitorEvent{Type: EventCompaction, Message: fmt.Sprintf("%d -> %d messages", beforeCount, len(a.history))})
-	}
 	a.mu.Unlock()
 	return nil
 }
@@ -1746,10 +1742,6 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 	log.Printf("[Chat] === New message ===")
 	log.Printf("[Chat] User input: %s", truncate(userInput, 200))
 
-	if a.monitor != nil {
-		a.monitor.Emit(MonitorEvent{Type: EventUserMsg, Message: userInput})
-	}
-
 	a.appendHistory(openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: userInput,
@@ -1798,19 +1790,10 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			Tools:    openAITools,
 		}
 
-		if a.monitor != nil {
-			a.monitor.Emit(MonitorEvent{Type: EventLLMRequest})
-		}
 		resp, err := a.client.CreateChatCompletion(ctx, req)
 		if err != nil {
 			log.Printf("[Chat] LLM error: %v", err)
-			if a.monitor != nil {
-				a.monitor.Emit(MonitorEvent{Type: EventError, Message: fmt.Sprintf("LLM error: %v", err)})
-			}
 			return "", err
-		}
-		if a.monitor != nil {
-			a.monitor.Emit(MonitorEvent{Type: EventLLMResponse})
 		}
 
 		if len(resp.Choices) == 0 {
@@ -1825,9 +1808,6 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			msg.Content = cleanResponse(msg.Content)
 			log.Printf("[Chat] Final reply (no tool calls): %s", truncate(msg.Content, 200))
 			a.appendHistory(msg)
-			if a.monitor != nil {
-				a.monitor.Emit(MonitorEvent{Type: EventAssistantMsg, Message: msg.Content})
-			}
 			return msg.Content, nil
 		}
 
@@ -1841,10 +1821,6 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			toolArgs := toolCall.Function.Arguments
 			log.Printf("[Chat] Tool call: %s(%s)", toolName, truncate(toolArgs, 200))
 
-			if a.monitor != nil {
-				a.monitor.Emit(MonitorEvent{Type: EventToolCall, Tool: toolName, Detail: truncate(toolArgs, 80)})
-			}
-
 			a.mu.RLock()
 			tool, exists := a.tools[toolName]
 			timeout := a.toolTimeout
@@ -1853,23 +1829,11 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			a.mu.RUnlock()
 
 			if tp, ok := tool.(ToolWithProgress); ok && progressCb != nil {
-				tp.SetProgressCallback(func(msg string) {
-					progressCb(msg)
-					if a.monitor != nil {
-						a.monitor.Emit(MonitorEvent{Type: EventProgress, Message: msg})
-					}
-				})
-			} else if tp, ok := tool.(ToolWithProgress); ok && a.monitor != nil {
-				tp.SetProgressCallback(func(msg string) {
-					a.monitor.Emit(MonitorEvent{Type: EventProgress, Message: msg})
-				})
+				tp.SetProgressCallback(progressCb)
 			}
 
 			if !exists {
 				log.Printf("[Chat] Tool %q NOT FOUND", toolName)
-				if a.monitor != nil {
-					a.monitor.Emit(MonitorEvent{Type: EventError, Message: fmt.Sprintf("Tool %q not found", toolName)})
-				}
 				toolMsg := openai.ChatCompletionMessage{
 					Role:       openai.ChatMessageRoleTool,
 					Content:    fmt.Sprintf("Error: tool %q does not exist. Use only the available tools.", toolName),
@@ -1882,9 +1846,6 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 			if isLoop, hint := loopDetector.detectLoop(toolName, toolArgs); isLoop {
 				log.Printf("[Agent] Loop detected for tool %q", toolName)
-				if a.monitor != nil {
-					a.monitor.Emit(MonitorEvent{Type: EventError, Message: fmt.Sprintf("Loop detected: %s(%s)", toolName, truncate(toolArgs, 60))})
-				}
 				toolMsg := openai.ChatCompletionMessage{
 					Role:       openai.ChatMessageRoleTool,
 					Content:    hint,
@@ -1908,9 +1869,6 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 				cancel()
 				if err != nil {
 					resultText = fmt.Sprintf("Error executing tool: %v", err)
-					if a.monitor != nil {
-						a.monitor.Emit(MonitorEvent{Type: EventError, Message: fmt.Sprintf("%s: %v", toolName, err)})
-					}
 				}
 			} else {
 				resultCh := make(chan struct {
@@ -1934,9 +1892,6 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 					}
 				case <-time.After(timeout):
 					resultText = fmt.Sprintf("Error: tool %q timed out after %v", toolName, timeout)
-					if a.monitor != nil {
-						a.monitor.Emit(MonitorEvent{Type: EventError, Message: fmt.Sprintf("%s timed out after %v", toolName, timeout)})
-					}
 					go func() { <-resultCh }()
 				}
 			}
@@ -1945,10 +1900,6 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 			elapsed := time.Since(start)
 			log.Printf("[Chat] Tool %q completed in %v, result: %s", toolName, elapsed, truncate(resultText, 200))
-
-			if a.monitor != nil {
-				a.monitor.Emit(MonitorEvent{Type: EventToolResult, Tool: toolName, Message: truncate(resultText, 100), Duration: elapsed})
-			}
 
 			if tp, ok := tool.(ToolWithProgress); ok {
 				tp.SetProgressCallback(nil)
@@ -1968,9 +1919,6 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 	}
 
 	log.Printf("[Chat] Circuit breaker triggered after %d iterations, %d cumulative tool calls", maxIter, cumulativeToolCalls)
-	if a.monitor != nil {
-		a.monitor.Emit(MonitorEvent{Type: EventError, Message: fmt.Sprintf("Circuit breaker: %d iterations, %d tool calls", maxIter, cumulativeToolCalls)})
-	}
 	return "", fmt.Errorf("agent reached maximum thinking steps (circuit breaker: %d iterations, %d tool calls)", maxIter, cumulativeToolCalls)
 }
 
@@ -2455,8 +2403,6 @@ func main() {
 	telegramToken := flag.String("telegram", "", "Telegram bot token (overrides config file)")
 	allowedUsers := flag.String("allowed", "", "Comma-separated Telegram user IDs (overrides config file)")
 	doInit := flag.Bool("init", false, "Create example config.json in current directory")
-	tuiMode := flag.Bool("tui", false, "Launch terminal UI monitor alongside bot")
-	demoMode := flag.Bool("demo", false, "Launch TUI with demo mock data")
 	flag.Parse()
 
 	if *doInit {
@@ -2537,14 +2483,6 @@ func main() {
 	agent.RegisterTool(NewMomondoFlightTool(cfg.Agent.Headless))
 	agent.RegisterTool(NewBrowserTool(cfg.Agent.Headless))
 	agent.RegisterTool(NewIdentifyAircraftTool(cfg.Agent.Headless))
-
-	var monitor *Monitor
-	if *tuiMode {
-		monitor = NewMonitor()
-		agent.monitor = monitor
-		RunMonitor(monitor, *demoMode)
-		log.Printf("[TUI] Monitor launched")
-	}
 
 	agent.mu.RLock()
 	mi := agent.maxIterations
