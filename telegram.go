@@ -307,8 +307,6 @@ func (t *TelegramBot) handleMessage(msg *tgbotapi.Message) {
 	} else {
 		t.editMessage(chatID, statusMsgID, reply)
 	}
-
-	t.agent.CompactInBackground(t.ctx)
 }
 
 func (t *TelegramBot) sendMessage(chatID int64, text string) int {

@@ -1202,6 +1202,7 @@ func NewAgent(client *openai.Client, wal *WAL) *Agent {
 				}
 			}
 			log.Printf("[Agent] restored %d messages from WAL", len(a.history))
+			a.compactHistoryIfNeeded(context.Background())
 			return a
 		}
 	}
@@ -1750,6 +1751,10 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 	if err := a.compactHistoryIfNeeded(ctx); err != nil {
 		log.Printf("[Agent] Compaction failed: %v", err)
 	}
+
+	defer func() {
+		go a.CompactInBackground(context.Background())
+	}()
 
 	var openAITools []openai.Tool
 	a.mu.RLock()
@@ -2601,6 +2606,5 @@ func main() {
 			continue
 		}
 		fmt.Printf("\nAgent: %s\n\n", reply)
-		agent.CompactInBackground(ctx)
 	}
 }
