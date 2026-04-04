@@ -100,7 +100,7 @@ func TestDurMinutes_InvalidFormat(t *testing.T) {
 }
 
 func TestBuildMomondoURL_Basic(t *testing.T) {
-	url := buildMomondoURL("HKT", "FRA", "2026-05-01", "", 2, "", "price")
+	url := buildMomondoURL("HKT", "FRA", "2026-05-01", "", 2, "", "price", "")
 	expected := "https://www.momondo.de/flight-search/HKT-FRA/2026-05-01/2adults?sort=price_a"
 	if url != expected {
 		t.Fatalf("expected %q, got %q", expected, url)
@@ -108,23 +108,39 @@ func TestBuildMomondoURL_Basic(t *testing.T) {
 }
 
 func TestBuildMomondoURL_WithReturn(t *testing.T) {
-	url := buildMomondoURL("HKT", "FRA", "2026-05-01", "2026-05-15", 2, "", "best")
+	url := buildMomondoURL("HKT", "FRA", "2026-05-01", "2026-05-15", 2, "", "best", "")
 	if url != "https://www.momondo.de/flight-search/HKT-FRA/2026-05-01/2adults/2026-05-15?sort=bestflight_a" {
 		t.Fatalf("unexpected URL: %s", url)
 	}
 }
 
 func TestBuildMomondoURL_WithChildren(t *testing.T) {
-	url := buildMomondoURL("HKT", "FRA", "2026-05-01", "", 2, "10-10", "duration")
+	url := buildMomondoURL("HKT", "FRA", "2026-05-01", "", 2, "10-10", "duration", "")
 	if url != "https://www.momondo.de/flight-search/HKT-FRA/2026-05-01/2adults/children-10-10?sort=duration_a" {
 		t.Fatalf("unexpected URL: %s", url)
 	}
 }
 
 func TestBuildMomondoURL_DefaultSort(t *testing.T) {
-	url := buildMomondoURL("HKT", "KUL", "2026-06-01", "", 1, "", "")
+	url := buildMomondoURL("HKT", "KUL", "2026-06-01", "", 1, "", "", "")
 	if url != "https://www.momondo.de/flight-search/HKT-KUL/2026-06-01/1adults?sort=bestflight_a" {
 		t.Fatalf("unexpected URL: %s", url)
+	}
+}
+
+func TestBuildMomondoURL_DirectOnly(t *testing.T) {
+	url := buildMomondoURL("HKT", "FRA", "2026-05-01", "", 2, "", "price", "0")
+	expected := "https://www.momondo.de/flight-search/HKT-FRA/2026-05-01/2adults?sort=price_a&stops=0"
+	if url != expected {
+		t.Fatalf("expected %q, got %q", expected, url)
+	}
+}
+
+func TestBuildMomondoURL_MaxOneStop(t *testing.T) {
+	url := buildMomondoURL("HKT", "FRA", "2026-05-01", "", 2, "", "price", "1")
+	expected := "https://www.momondo.de/flight-search/HKT-FRA/2026-05-01/2adults?sort=price_a&stops=1"
+	if url != expected {
+		t.Fatalf("expected %q, got %q", expected, url)
 	}
 }
 

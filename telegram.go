@@ -264,6 +264,13 @@ func (t *TelegramBot) handleMessage(msg *tgbotapi.Message) {
 
 	statusMsgID := t.sendMessage(chatID, "🤔 Thinking...")
 
+	a := t.agent
+	a.mu.RLock()
+	modelName := a.activeModel
+	modelID := a.model
+	a.mu.RUnlock()
+	log.Printf("[Telegram] [%s] Dispatching to model %s (%s): %q", msg.From.UserName, modelName, modelID, truncate(text, 200))
+
 	var lastProgress time.Time
 	progressCb := func(msg string) {
 		if time.Since(lastProgress) < 2*time.Second {
@@ -313,16 +320,17 @@ func (t *TelegramBot) sendMessage(chatID int64, text string) int {
 	msg := tgbotapi.NewMessage(chatID, text)
 	sent, err := t.bot.Send(msg)
 	if err != nil {
-		log.Printf("[Telegram] Failed to send message: %v", err)
+		log.Printf("[Telegram] Failed to send message to chat %d: %v (text length: %d)", chatID, err, len(text))
 		return 0
 	}
+	log.Printf("[Telegram] Message sent to chat %d (msg_id: %d, length: %d)", chatID, sent.MessageID, len(text))
 	return sent.MessageID
 }
 
 func (t *TelegramBot) editMessage(chatID int64, messageID int, text string) {
 	msg := tgbotapi.NewEditMessageText(chatID, messageID, text)
 	if _, err := t.bot.Send(msg); err != nil {
-		log.Printf("[Telegram] Failed to edit message: %v", err)
+		log.Printf("[Telegram] Failed to edit message %d in chat %d: %v (text length: %d)", messageID, chatID, err, len(text))
 	}
 }
 
@@ -330,9 +338,10 @@ func (t *TelegramBot) sendMarkdown(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
 	if _, err := t.bot.Send(msg); err != nil {
+		log.Printf("[Telegram] Markdown send failed, retrying plain text: %v", err)
 		msg.ParseMode = ""
 		if _, err2 := t.bot.Send(msg); err2 != nil {
-			log.Printf("[Telegram] Failed to send message: %v", err2)
+			log.Printf("[Telegram] Failed to send plain text message: %v", err2)
 		}
 	}
 }
@@ -343,26 +352,33 @@ func (t *TelegramBot) sendTyping(chatID int64) {
 }
 
 func (t *TelegramBot) downloadPhotoAsBase64(fileID string) (string, error) {
+	downloadStart := time.Now()
+
 	fileURL, err := t.bot.GetFileDirectURL(fileID)
 	if err != nil {
+		log.Printf("[Telegram] Failed to get file URL for %s after %v: %v", fileID, time.Since(downloadStart), err)
 		return "", fmt.Errorf("failed to get file URL: %w", err)
 	}
 
 	resp, err := http.Get(fileURL)
 	if err != nil {
+		log.Printf("[Telegram] Failed to download photo from %s after %v: %v", fileURL, time.Since(downloadStart), err)
 		return "", fmt.Errorf("failed to download file: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("[Telegram] Bad download status %s for %s after %v", resp.Status, fileURL, time.Since(downloadStart))
 		return "", fmt.Errorf("bad status: %s", resp.Status)
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("[Telegram] Failed to read response body after %v: %v", time.Since(downloadStart), err)
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
 
+	log.Printf("[Telegram] Photo downloaded: %d bytes in %v (fileID: %s)", len(data), time.Since(downloadStart).Round(time.Millisecond), fileID)
 	return base64.StdEncoding.EncodeToString(data), nil
 }
 

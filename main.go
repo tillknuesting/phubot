@@ -526,8 +526,11 @@ func (t *BrowserTool) Definition() openai.Tool {
 }
 
 func (t *BrowserTool) Execute(args string) (string, error) {
+	log.Printf("[Browser] Execute called with args: %s", args)
+
 	var parsedArgs map[string]string
 	if err := json.Unmarshal([]byte(args), &parsedArgs); err != nil {
+		log.Printf("[Browser] Failed to parse args: %v", err)
 		return "", fmt.Errorf("failed to parse tool args: %v", err)
 	}
 
@@ -543,8 +546,10 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 		}
 	}
 
-	log.Printf("[Browser] Navigating to URL: %s", targetURL)
+	log.Printf("[Browser] Navigating to URL: %s (wait: %ds, headless: %v)", targetURL, waitSecs, t.headless)
 	t.progress(fmt.Sprintf("🌐 Browsing %s...", targetURL))
+
+	browseStart := time.Now()
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", t.headless),
@@ -603,6 +608,7 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 	)
 
 	if err != nil {
+		log.Printf("[Browser] Browser execution failed after %v: %v", time.Since(browseStart), err)
 		return "", fmt.Errorf("browser execution failed: %v", err)
 	}
 
@@ -610,7 +616,7 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 		pageText = pageText[:6000]
 	}
 
-	log.Printf("[Browser] Page scraped successfully (%d chars)", len(pageText))
+	log.Printf("[Browser] Page scraped successfully in %v (%d chars)", time.Since(browseStart), len(pageText))
 	t.progress(fmt.Sprintf("✅ Page loaded (%d chars extracted)", len(pageText)))
 
 	return "BROWSER EXTRACTED:\n" + pageText, nil
@@ -718,10 +724,12 @@ func (m *Memory) Flush(ctx context.Context, client *openai.Client, model string,
 func (m *Memory) appendWithRotation(filePath, content string) error {
 	info, err := os.Stat(filePath)
 	if err != nil && !os.IsNotExist(err) {
+		log.Printf("[Memory] Failed to stat %s: %v", filePath, err)
 		return fmt.Errorf("failed to stat memory file: %w", err)
 	}
 
 	if err == nil && info.Size() > int64(m.maxSize) {
+		log.Printf("[Memory] File size %d exceeds max %d, rotating", info.Size(), m.maxSize)
 		if err := m.rotateMemory(filePath); err != nil {
 			log.Printf("[Memory] Rotation failed, continuing with append: %v", err)
 		}
@@ -738,6 +746,7 @@ func (m *Memory) appendWithRotation(filePath, content string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("failed to close MEMORY.md: %w", err)
 	}
+	log.Printf("[Memory] Appended %d bytes to %s", len(content), filePath)
 	return nil
 }
 
@@ -783,6 +792,7 @@ func (m *Memory) ReadMemory() (string, error) {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
+		log.Printf("[Memory] Failed to read %s: %v", mainFile, err)
 		return "", err
 	}
 	return string(data), nil
@@ -959,6 +969,7 @@ type Agent struct {
 	loopDetector     *LoopDetector
 	pruningConfig    PruningConfig
 	progressCb       func(string)
+	noHistory        bool
 }
 
 // LoopDetector identifies when the LLM is stuck in a repetitive tool call pattern.
@@ -1221,8 +1232,10 @@ func (a *Agent) buildSystemPrompt() string {
 	}
 	memContent, err := a.memory.ReadMemory()
 	if err != nil || memContent == "" {
+		log.Printf("[Agent] System prompt: no memory content loaded (err=%v, empty=%v)", err, memContent == "")
 		return base
 	}
+	log.Printf("[Agent] System prompt: injected %d bytes of memory context", len(memContent))
 	return fmt.Sprintf("%s\n\n## Remembered Context:\n%s", base, memContent)
 }
 
@@ -1242,6 +1255,7 @@ func (a *Agent) RefreshSystemPrompt() {
 }
 
 func (a *Agent) appendHistory(msg openai.ChatCompletionMessage) {
+	msg.ReasoningContent = ""
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = append(a.history, msg)
@@ -1261,14 +1275,18 @@ func (a *Agent) RegisterTool(t Tool) {
 func (a *Agent) SetToolTimeout(timeout time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	old := a.toolTimeout
 	a.toolTimeout = timeout
+	log.Printf("[Agent] Tool timeout: %v -> %v", old, timeout)
 }
 
 func (a *Agent) SetMaxIterations(n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if n > 0 {
+		old := a.maxIterations
 		a.maxIterations = n
+		log.Printf("[Agent] Max iterations: %d -> %d", old, n)
 	}
 }
 
@@ -1276,7 +1294,9 @@ func (a *Agent) setModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if model != "" {
+		old := a.model
 		a.model = model
+		log.Printf("[Agent] Model: %s -> %s", old, model)
 	}
 }
 
@@ -1284,16 +1304,20 @@ func (a *Agent) setContextWindow(window int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if window > 0 {
+		old := a.contextWindow
 		a.contextWindow = window
 		a.reserveTokens = int(float64(window) * ReserveTokensRatio)
 		a.keepRecentTokens = int(float64(window) * KeepRecentTokensRatio)
+		log.Printf("[Agent] Context window: %d -> %d (reserve: %d, keep_recent: %d)", old, window, a.reserveTokens, a.keepRecentTokens)
 	}
 }
 
 func (a *Agent) setPruningConfig(pc PruningConfig) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	old := a.pruningConfig.Mode
 	a.pruningConfig = pc
+	log.Printf("[Agent] Pruning config: %s -> %s", old, pc.Mode)
 }
 
 func (a *Agent) SetProgressCallback(cb func(string)) {
@@ -1314,15 +1338,21 @@ func (a *Agent) SwitchModel(name string) error {
 
 	client, ok := a.clients[name]
 	if !ok {
+		available := make([]string, 0, len(a.modelConfigs))
+		for k := range a.modelConfigs {
+			available = append(available, k)
+		}
+		log.Printf("[Agent] Switch failed: unknown model %q, available: %v", name, available)
 		return fmt.Errorf("unknown model %q", name)
 	}
 	mc := a.modelConfigs[name]
 
+	oldModel := a.activeModel
 	a.client = client
 	a.model = mc.Model
 	a.activeModel = name
 
-	log.Printf("[Agent] Switched to model %q (%s @ %s)", name, mc.Model, mc.BaseURL)
+	log.Printf("[Agent] Switched model: %s (%s @ %s) -> %s (%s @ %s)", oldModel, a.model, "", name, mc.Model, mc.BaseURL)
 	return nil
 }
 
@@ -1454,6 +1484,9 @@ func (a *Agent) defaultSummarizer(ctx context.Context, prompt string, messages [
 		return "", fmt.Errorf("no LLM client available for summarization")
 	}
 
+	log.Printf("[Summarizer] Generating summary for %d messages (model: %s)", len(messages), a.model)
+	summarizeStart := time.Now()
+
 	serialized := serializeMessages(messages)
 	req := openai.ChatCompletionRequest{
 		Model: a.model,
@@ -1465,16 +1498,22 @@ func (a *Agent) defaultSummarizer(ctx context.Context, prompt string, messages [
 
 	resp, err := a.client.CreateChatCompletion(ctx, req)
 	if err != nil {
+		log.Printf("[Summarizer] LLM call failed after %v: %v", time.Since(summarizeStart), err)
 		return "", err
 	}
 	if len(resp.Choices) == 0 {
+		log.Printf("[Summarizer] LLM returned no choices after %v", time.Since(summarizeStart))
 		return "", fmt.Errorf("LLM returned no choices")
 	}
+
+	log.Printf("[Summarizer] Summary generated in %v (usage: prompt=%d completion=%d total=%d, input_msgs=%d)",
+		time.Since(summarizeStart).Round(time.Millisecond), resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, len(messages))
 	return resp.Choices[0].Message.Content, nil
 }
 
 func (a *Agent) generateSummary(ctx context.Context, messages []openai.ChatCompletionMessage) string {
 	if len(messages) == 0 {
+		log.Printf("[Compaction] generateSummary called with 0 messages, returning placeholder")
 		return "No previous context."
 	}
 
@@ -1485,9 +1524,11 @@ func (a *Agent) generateSummary(ctx context.Context, messages []openai.ChatCompl
 
 	summary, err := fn(ctx, SummaryPrompt, messages)
 	if err != nil {
-		log.Printf("[Compaction] Summary generation failed: %v", err)
+		log.Printf("[Compaction] Summary generation failed for %d messages: %v", len(messages), err)
 		return fmt.Sprintf("Summary generation failed. %d messages were compacted.", len(messages))
 	}
+
+	log.Printf("[Compaction] Summary generated: %d chars from %d messages", len(summary), len(messages))
 	return summary
 }
 
@@ -1740,7 +1781,15 @@ func (a *Agent) pruneToolResults(history []openai.ChatCompletionMessage) []opena
 func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 	a.RefreshSystemPrompt()
 
+	a.mu.RLock()
+	activeModel := a.activeModel
+	modelID := a.model
+	noHist := a.noHistory
+	totalHistory := len(a.history)
+	a.mu.RUnlock()
+
 	log.Printf("[Chat] === New message ===")
+	log.Printf("[Chat] Model: %s (%s), no_history: %v, stored history: %d messages", activeModel, modelID, noHist, totalHistory)
 	log.Printf("[Chat] User input: %s", truncate(userInput, 200))
 
 	a.appendHistory(openai.ChatCompletionMessage{
@@ -1748,29 +1797,48 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 		Content: userInput,
 	})
 
-	if err := a.compactHistoryIfNeeded(ctx); err != nil {
-		log.Printf("[Agent] Compaction failed: %v", err)
-	}
+	if !a.noHistory {
+		if err := a.compactHistoryIfNeeded(ctx); err != nil {
+			log.Printf("[Agent] Compaction failed: %v", err)
+		}
 
-	defer func() {
-		go a.CompactInBackground(context.Background())
-	}()
+		defer func() {
+			go a.CompactInBackground(context.Background())
+		}()
+	} else {
+		log.Printf("[Chat] Skipping compaction (no_history mode)")
+	}
 
 	var openAITools []openai.Tool
 	a.mu.RLock()
 	for _, t := range a.tools {
 		openAITools = append(openAITools, t.Definition())
 	}
-	historyCopy := make([]openai.ChatCompletionMessage, len(a.history))
-	copy(historyCopy, a.history)
+	var historyCopy []openai.ChatCompletionMessage
+	if a.noHistory {
+		var systemMsg openai.ChatCompletionMessage
+		var lastUserMsg openai.ChatCompletionMessage
+		for _, m := range a.history {
+			if m.Role == openai.ChatMessageRoleSystem {
+				systemMsg = m
+			}
+		}
+		for i := len(a.history) - 1; i >= 0; i-- {
+			if a.history[i].Role == openai.ChatMessageRoleUser {
+				lastUserMsg = a.history[i]
+				break
+			}
+		}
+		historyCopy = []openai.ChatCompletionMessage{systemMsg, lastUserMsg}
+		log.Printf("[Chat] no_history mode: sending only system prompt + latest user message (skipped %d historical messages)", totalHistory-1)
+	} else {
+		historyCopy = make([]openai.ChatCompletionMessage, len(a.history))
+		copy(historyCopy, a.history)
+	}
 	a.mu.RUnlock()
 
-	log.Printf("[Chat] History size: %d messages, %d tools available", len(historyCopy), len(openAITools))
-	for _, t := range openAITools {
-		log.Printf("[Chat] Registered tool: %s", t.Function.Name)
-	}
+	log.Printf("[Chat] Sending to LLM: %d messages, %d tools available", len(historyCopy), len(openAITools))
 
-	// NEW: Prune tool results before sending to LLM (Tier 1)
 	historyCopy = a.pruneToolResults(historyCopy)
 
 	a.mu.RLock()
@@ -1789,17 +1857,28 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 			log.Printf("[Chat] [DEBUG] Approaching circuit breaker limit (iteration %d/%d)", iter+1, maxIter)
 		}
 
+		for i := range historyCopy {
+			historyCopy[i].ReasoningContent = ""
+		}
+
 		req := openai.ChatCompletionRequest{
 			Model:    a.model,
 			Messages: historyCopy,
 			Tools:    openAITools,
 		}
 
+		log.Printf("[Chat] Sending request to %s (model: %s, messages: %d, tools: %d)", activeModel, a.model, len(historyCopy), len(openAITools))
+		apiStart := time.Now()
+
 		resp, err := a.client.CreateChatCompletion(ctx, req)
+		apiElapsed := time.Since(apiStart)
+
 		if err != nil {
-			log.Printf("[Chat] LLM error: %v", err)
+			log.Printf("[Chat] LLM error after %v: %v", apiElapsed, err)
 			return "", err
 		}
+
+		log.Printf("[Chat] LLM responded in %v (model: %s, usage: prompt=%d completion=%d total=%d)", apiElapsed, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
 
 		if len(resp.Choices) == 0 {
 			log.Printf("[Chat] LLM returned no choices")
@@ -1929,8 +2008,16 @@ func (a *Agent) Chat(ctx context.Context, userInput string) (string, error) {
 
 func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 string) (string, error) {
 	a.RefreshSystemPrompt()
+
+	a.mu.RLock()
+	activeModel := a.activeModel
+	modelID := a.model
+	noHist := a.noHistory
+	a.mu.RUnlock()
+
 	log.Printf("[ChatWithImage] === New image message ===")
-	log.Printf("[ChatWithImage] Prompt: %s", truncate(prompt, 200))
+	log.Printf("[ChatWithImage] Model: %s (%s), no_history: %v", activeModel, modelID, noHist)
+	log.Printf("[ChatWithImage] Prompt: %s, image base64 length: %d", truncate(prompt, 200), len(imageBase64))
 
 	a.mu.Lock()
 	a.history = append(a.history, openai.ChatCompletionMessage{
@@ -1957,9 +2044,26 @@ func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 st
 			log.Printf("[Agent] WAL append error: %v", err)
 		}
 	}
-	historyCopy := make([]openai.ChatCompletionMessage, len(a.history))
-	copy(historyCopy, a.history)
+	var historyCopy []openai.ChatCompletionMessage
+	if a.noHistory {
+		var systemMsg openai.ChatCompletionMessage
+		for _, m := range a.history {
+			if m.Role == openai.ChatMessageRoleSystem {
+				systemMsg = m
+				break
+			}
+		}
+		lastIdx := len(a.history) - 1
+		historyCopy = []openai.ChatCompletionMessage{systemMsg, a.history[lastIdx]}
+	} else {
+		historyCopy = make([]openai.ChatCompletionMessage, len(a.history))
+		copy(historyCopy, a.history)
+	}
 	a.mu.Unlock()
+
+	for i := range historyCopy {
+		historyCopy[i].ReasoningContent = ""
+	}
 
 	var openAITools []openai.Tool
 	a.mu.RLock()
@@ -1974,8 +2078,14 @@ func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 st
 		Tools:    openAITools,
 	}
 
+	log.Printf("[ChatWithImage] Sending vision request to %s (model: %s, messages: %d)", activeModel, a.model, len(historyCopy))
+	apiStart := time.Now()
+
 	resp, err := a.client.CreateChatCompletion(ctx, req)
+	apiElapsed := time.Since(apiStart)
+
 	if err != nil {
+		log.Printf("[ChatWithImage] Vision request failed after %v: %v", apiElapsed, err)
 		if strings.Contains(err.Error(), "does not support") || strings.Contains(err.Error(), "not support") {
 			log.Printf("[Vision] Model doesn't support images, trying text-only fallback")
 			a.mu.Lock()
@@ -2015,11 +2125,15 @@ func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 st
 		return "", err
 	}
 
+	log.Printf("[ChatWithImage] Vision response received in %v (model: %s, usage: prompt=%d completion=%d total=%d)", apiElapsed, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+
 	if len(resp.Choices) == 0 {
+		log.Printf("[ChatWithImage] LLM returned no choices")
 		return "", fmt.Errorf("LLM returned no choices")
 	}
 
 	msg := resp.Choices[0].Message
+	log.Printf("[ChatWithImage] Response: content=%q, tool_calls=%d", truncate(msg.Content, 100), len(msg.ToolCalls))
 
 	if len(msg.ToolCalls) == 0 {
 		a.appendHistory(openai.ChatCompletionMessage{
@@ -2068,13 +2182,20 @@ func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 st
 	a.mu.RUnlock()
 	historyCopy = a.pruneToolResults(historyCopy)
 
+	for i := range historyCopy {
+		historyCopy[i].ReasoningContent = ""
+	}
+
 	followUpReq := openai.ChatCompletionRequest{
 		Model:    a.model,
 		Messages: historyCopy,
 		Tools:    openAITools,
 	}
+	log.Printf("[ChatWithImage] Sending follow-up request after tool calls (messages: %d)", len(historyCopy))
+	followUpStart := time.Now()
 	followUpResp, followUpErr := a.client.CreateChatCompletion(ctx, followUpReq)
 	if followUpErr != nil {
+		log.Printf("[ChatWithImage] Follow-up request failed after %v: %v", time.Since(followUpStart), followUpErr)
 		return cleanResponse(msg.Content), nil
 	}
 	if len(followUpResp.Choices) == 0 {
@@ -2082,6 +2203,7 @@ func (a *Agent) ChatWithImage(ctx context.Context, prompt string, imageBase64 st
 	}
 	followUpMsg := followUpResp.Choices[0].Message
 	followUpMsg.Content = cleanResponse(followUpMsg.Content)
+	log.Printf("[ChatWithImage] Follow-up response received in %v (usage: prompt=%d completion=%d total=%d)", time.Since(followUpStart), followUpResp.Usage.PromptTokens, followUpResp.Usage.CompletionTokens, followUpResp.Usage.TotalTokens)
 	a.appendHistory(followUpMsg)
 	return followUpMsg.Content, nil
 }
@@ -2148,6 +2270,7 @@ func (s *Scheduler) Schedule(id string, prompt string, interval time.Duration) e
 }
 
 func (s *Scheduler) runTask(task *ScheduledTask) {
+	log.Printf("[Scheduler] runTask goroutine started for %q (interval: %v)", task.ID, task.Interval)
 	ticker := time.NewTicker(task.Interval)
 	defer ticker.Stop()
 
@@ -2157,11 +2280,13 @@ func (s *Scheduler) runTask(task *ScheduledTask) {
 		s.mu.RUnlock()
 
 		if !active {
+			log.Printf("[Scheduler] runTask goroutine exiting for %q (task deactivated)", task.ID)
 			return
 		}
 
 		select {
 		case <-s.ctx.Done():
+			log.Printf("[Scheduler] runTask goroutine exiting for %q (context cancelled)", task.ID)
 			return
 		case <-ticker.C:
 			s.executeTask(task)
@@ -2229,6 +2354,49 @@ func (s *Scheduler) ListTasks() []*ScheduledTask {
 		result = append(result, &copy)
 	}
 	return result
+}
+
+func (s *Scheduler) LogStatus() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(s.tasks) == 0 {
+		log.Printf("[Scheduler] Status: no active tasks")
+		return
+	}
+
+	log.Printf("[Scheduler] Status: %d task(s) active", len(s.tasks))
+	for _, task := range s.tasks {
+		status := "active"
+		if !task.Active {
+			status = "inactive"
+		}
+		lastRun := "never"
+		if !task.LastRun.IsZero() {
+			lastRun = task.LastRun.Format("15:04:05")
+		}
+		nextRun := "n/a"
+		if !task.NextRun.IsZero() {
+			nextRun = task.NextRun.Format("15:04:05")
+		}
+		log.Printf("[Scheduler]   - %q: every %v, %s, runs: %d, last: %s, next: %s, prompt: %q",
+			task.ID, task.Interval, status, task.RunCount, lastRun, nextRun, truncate(task.Prompt, 60))
+	}
+}
+
+func (s *Scheduler) startStatusLoop(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-ticker.C:
+				s.LogStatus()
+			}
+		}
+	}()
 }
 
 func (s *Scheduler) ParseDuration(input string) (time.Duration, error) {
@@ -2343,6 +2511,8 @@ func (t *SchedulerTool) Definition() openai.Tool {
 }
 
 func (t *SchedulerTool) Execute(args string) (string, error) {
+	log.Printf("[Scheduler] Execute called: %s", args)
+
 	var params struct {
 		Action   string `json:"action"`
 		TaskID   string `json:"task_id"`
@@ -2351,8 +2521,11 @@ func (t *SchedulerTool) Execute(args string) (string, error) {
 	}
 
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
+		log.Printf("[Scheduler] Failed to parse args: %v", err)
 		return "", fmt.Errorf("failed to parse args: %v", err)
 	}
+
+	log.Printf("[Scheduler] Action: %s, task_id: %q, interval: %q", params.Action, params.TaskID, params.Interval)
 
 	switch params.Action {
 	case "schedule":
@@ -2361,24 +2534,32 @@ func (t *SchedulerTool) Execute(args string) (string, error) {
 		}
 		interval, err := t.scheduler.ParseDuration(params.Interval)
 		if err != nil {
+			log.Printf("[Scheduler] Failed to parse interval %q: %v", params.Interval, err)
 			return "", err
 		}
+		log.Printf("[Scheduler] Scheduling task %q: %q every %v", params.TaskID, truncate(params.Prompt, 80), interval)
 		if err := t.scheduler.Schedule(params.TaskID, params.Prompt, interval); err != nil {
+			log.Printf("[Scheduler] Schedule failed: %v", err)
 			return "", err
 		}
+		log.Printf("[Scheduler] Task %q scheduled successfully", params.TaskID)
 		return fmt.Sprintf("Task %q scheduled to run every %v. Use action 'cancel' with task_id to stop it.", params.TaskID, interval), nil
 
 	case "cancel":
 		if params.TaskID == "" {
 			return "", fmt.Errorf("cancel requires task_id")
 		}
+		log.Printf("[Scheduler] Cancelling task %q", params.TaskID)
 		if err := t.scheduler.Cancel(params.TaskID); err != nil {
+			log.Printf("[Scheduler] Cancel failed for %q: %v", params.TaskID, err)
 			return "", err
 		}
+		log.Printf("[Scheduler] Task %q cancelled", params.TaskID)
 		return fmt.Sprintf("Task %q cancelled.", params.TaskID), nil
 
 	case "list":
 		tasks := t.scheduler.ListTasks()
+		log.Printf("[Scheduler] Listing %d tasks", len(tasks))
 		if len(tasks) == 0 {
 			return "No scheduled tasks.", nil
 		}
@@ -2492,6 +2673,7 @@ func main() {
 		agent.SetMaxIterations(cfg.Agent.MaxIterations)
 	}
 	agent.setPruningConfig(cfg.PruningConfig())
+	agent.noHistory = cfg.Agent.NoHistory
 	agent.RegisterTool(NewMomondoFlightTool(cfg.Agent.Headless))
 	agent.RegisterTool(NewBrowserTool(cfg.Agent.Headless))
 	agent.RegisterTool(NewIdentifyAircraftTool(cfg.Agent.Headless))
@@ -2506,6 +2688,8 @@ func main() {
 
 	scheduler := NewScheduler(agent, ctx)
 	agent.RegisterTool(&SchedulerTool{scheduler: scheduler})
+	scheduler.LogStatus()
+	scheduler.startStatusLoop(30 * time.Minute)
 
 	effectiveToken := *telegramToken
 	if effectiveToken == "" {

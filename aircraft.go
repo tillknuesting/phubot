@@ -87,6 +87,9 @@ func (t *IdentifyAircraftTool) Execute(args string) (string, error) {
 }
 
 func (t *IdentifyAircraftTool) ExecuteWithContext(ctx context.Context, args string) (string, error) {
+	log.Printf("[Aircraft] ExecuteWithContext called: %s", args)
+	lookupStart := time.Now()
+
 	var params struct {
 		Origin      string `json:"origin"`
 		Destination string `json:"destination"`
@@ -94,8 +97,11 @@ func (t *IdentifyAircraftTool) ExecuteWithContext(ctx context.Context, args stri
 	}
 
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
+		log.Printf("[Aircraft] Failed to parse args: %v", err)
 		return "", fmt.Errorf("failed to parse args: %v", err)
 	}
+
+	log.Printf("[Aircraft] Looking up route: %s → %s (airline filter: %q)", params.Origin, params.Destination, params.Airline)
 
 	if params.Origin == "" || params.Destination == "" {
 		return "", fmt.Errorf("origin and destination are required")
@@ -119,8 +125,10 @@ func (t *IdentifyAircraftTool) ExecuteWithContext(ctx context.Context, args stri
 
 	if len(result.Entries) > 0 {
 		t.setCache(cacheKey, result)
+		log.Printf("[Aircraft] Lookup completed in %v: found %d entries, %d unique types for %s→%s", time.Since(lookupStart).Round(time.Millisecond), len(result.Entries), len(result.AircraftTypes), origin, dest)
 		t.progress(fmt.Sprintf("Found %d aircraft types for %s -> %s", len(result.AircraftTypes), origin, dest))
 	} else {
+		log.Printf("[Aircraft] Lookup completed in %v: no results for %s→%s", time.Since(lookupStart).Round(time.Millisecond), origin, dest)
 		t.progress(fmt.Sprintf("No aircraft data found for %s -> %s", origin, dest))
 	}
 
@@ -128,6 +136,7 @@ func (t *IdentifyAircraftTool) ExecuteWithContext(ctx context.Context, args stri
 }
 
 func (t *IdentifyAircraftTool) lookupRoute(ctx context.Context, origin, dest string) AircraftResult {
+	log.Printf("[Aircraft] lookupRoute: %s → %s", origin, dest)
 	result := AircraftResult{
 		Origin:      origin,
 		Destination: dest,
@@ -140,15 +149,19 @@ func (t *IdentifyAircraftTool) lookupRoute(ctx context.Context, origin, dest str
 	}
 
 	for _, q := range queries {
+		log.Printf("[Aircraft] Trying query: %q", q)
 		entries := t.googleSearchAircraft(ctx, q)
 		if len(entries) > 0 {
 			result.Source = "Google"
 			result.Entries = entries
 			result.AircraftTypes = extractUniqueAircraftTypes(entries)
+			log.Printf("[Aircraft] Found %d entries with query %q", len(entries), q)
 			return result
 		}
+		log.Printf("[Aircraft] No entries from query %q, trying next", q)
 	}
 
+	log.Printf("[Aircraft] All queries exhausted, no results for %s→%s", origin, dest)
 	result.Source = "none"
 	return result
 }
@@ -170,6 +183,9 @@ func (t *IdentifyAircraftTool) googleSearchAircraft(ctx context.Context, query s
 }
 
 func (t *IdentifyAircraftTool) browsePage(ctx context.Context, url string, waitSecs int) (string, error) {
+	log.Printf("[Aircraft] browsePage: %s (wait: %ds, headless: %v)", url, waitSecs, t.headless)
+	browseStart := time.Now()
+
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", t.headless),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
@@ -212,16 +228,21 @@ func (t *IdentifyAircraftTool) browsePage(ctx context.Context, url string, waitS
 		`, nil),
 	)
 	if err != nil {
+		log.Printf("[Aircraft] Navigation to %s failed after %v: %v", url, time.Since(browseStart), err)
 		return "", fmt.Errorf("navigation failed: %v", err)
 	}
+
+	log.Printf("[Aircraft] Page navigated, waiting %ds for content to load", waitSecs)
 
 	chromedp.Run(timeoutCtx, chromedp.Sleep(time.Duration(waitSecs)*time.Second))
 
 	var pageText string
 	if err := chromedp.Run(timeoutCtx, chromedp.Evaluate(`document.body.innerText.substring(0, 8000)`, &pageText)); err != nil {
+		log.Printf("[Aircraft] Text extraction failed: %v", err)
 		return "", fmt.Errorf("extract text failed: %v", err)
 	}
 
+	log.Printf("[Aircraft] browsePage completed in %v, extracted %d chars from %s", time.Since(browseStart).Round(time.Millisecond), len(pageText), url)
 	return pageText, nil
 }
 
@@ -351,11 +372,13 @@ var icaoToName = map[string]string{
 }
 
 func parseAircraftFromText(body string) []AircraftEntry {
+	parseStart := time.Now()
 	body = strings.ReplaceAll(body, "\u00a0", " ")
 	var entries []AircraftEntry
 	seen := make(map[string]bool)
 
 	matches := reAircraftType.FindAllString(body, -1)
+	log.Printf("[Aircraft] Regex 'aircraft_type' found %d matches in %d chars", len(matches), len(body))
 	for _, m := range matches {
 		normalized := normalizeAircraftType(m)
 		if normalized != "" && !seen[normalized] {
@@ -370,6 +393,7 @@ func parseAircraftFromText(body string) []AircraftEntry {
 	}
 
 	icaoMatches := reICAOAircraft.FindAllString(body, -1)
+	log.Printf("[Aircraft] Regex 'ICAO_aircraft' found %d matches in %d chars", len(icaoMatches), len(body))
 	for _, code := range icaoMatches {
 		name, ok := icaoToName[code]
 		if !ok {
@@ -386,6 +410,7 @@ func parseAircraftFromText(body string) []AircraftEntry {
 		}
 	}
 
+	log.Printf("[Aircraft] parseAircraftFromText: %d total entries from %d chars in %v", len(entries), len(body), time.Since(parseStart).Round(time.Millisecond))
 	return entries
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -74,6 +75,7 @@ type AgentConfig struct {
 	PruningMode     string   `json:"pruning_mode"`
 	Headless        bool     `json:"headless"`
 	MaxIterations   int      `json:"max_iterations"`
+	NoHistory       bool     `json:"no_history"`
 }
 
 type MemoryConfig struct {
@@ -128,12 +130,6 @@ var defaultConfig = Config{
 			APIKey:  "",
 			Model:   "glm-5.1",
 		},
-		{
-			Name:    "groq",
-			BaseURL: "https://api.groq.com/openai/v1",
-			APIKey:  "",
-			Model:   "qwen/qwen3-32b",
-		},
 	},
 }
 
@@ -141,6 +137,7 @@ func loadConfig(path string) (*Config, error) {
 	cfg := defaultConfig
 
 	if path == "" {
+		log.Printf("[Config] No config file specified, using defaults + env overrides")
 		cfg.applyEnvOverrides()
 		return &cfg, nil
 	}
@@ -148,10 +145,13 @@ func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			log.Printf("[Config] Config file not found: %s", path)
 			return nil, fmt.Errorf("config file not found: %s", path)
 		}
 		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
 	}
+
+	log.Printf("[Config] Loaded config from %s (%d bytes)", path, len(data))
 
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", path, err)
@@ -159,28 +159,29 @@ func loadConfig(path string) (*Config, error) {
 
 	cfg.applyEnvOverrides()
 
+	log.Printf("[Config] LLM: %s @ %s, Model: %s", cfg.LLM.Model, cfg.LLM.BaseURL, cfg.LLM.Model)
+	log.Printf("[Config] Agent: context_window=%d, headless=%v, no_history=%v, pruning=%s, max_iterations=%d", cfg.Agent.ContextWindow, cfg.Agent.Headless, cfg.Agent.NoHistory, cfg.Agent.PruningMode, cfg.Agent.MaxIterations)
+	log.Printf("[Config] Models: %d configured", len(cfg.Models))
+
 	return &cfg, nil
 }
 
 func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("LM_STUDIO_API_KEY"); v != "" {
 		c.LLM.APIKey = v
+		log.Printf("[Config] Override: LLM API key set from LM_STUDIO_API_KEY")
 	}
 	if v := os.Getenv("LM_STUDIO_URL"); v != "" {
 		c.LLM.BaseURL = v
+		log.Printf("[Config] Override: LLM URL set from LM_STUDIO_URL: %s", v)
 	}
 	if v := os.Getenv("TELEGRAM_TOKEN"); v != "" {
 		c.Telegram.Token = v
+		log.Printf("[Config] Override: Telegram token set from TELEGRAM_TOKEN")
 	}
 	if v := os.Getenv("ALLOWED_USERS"); v != "" {
 		c.Telegram.AllowedUsers = v
-	}
-	if v := os.Getenv("GROQ_API_KEY"); v != "" {
-		for i := range c.Models {
-			if c.Models[i].Name == "groq" {
-				c.Models[i].APIKey = v
-			}
-		}
+		log.Printf("[Config] Override: Allowed users set from ALLOWED_USERS: %s", v)
 	}
 }
 
@@ -195,6 +196,7 @@ func configPaths() []string {
 
 func findAndLoadConfig(explicitPath string) (*Config, string, error) {
 	if explicitPath != "" {
+		log.Printf("[Config] Using explicit config path: %s", explicitPath)
 		cfg, err := loadConfig(explicitPath)
 		if err != nil {
 			return nil, "", err
@@ -204,6 +206,7 @@ func findAndLoadConfig(explicitPath string) (*Config, string, error) {
 
 	for _, p := range configPaths() {
 		if _, err := os.Stat(p); err == nil {
+			log.Printf("[Config] Found config at: %s", p)
 			cfg, err := loadConfig(p)
 			if err != nil {
 				return nil, "", err
@@ -212,6 +215,7 @@ func findAndLoadConfig(explicitPath string) (*Config, string, error) {
 		}
 	}
 
+	log.Printf("[Config] No config file found in search paths, using defaults")
 	cfg, err := loadConfig("")
 	if err != nil {
 		return nil, "", err

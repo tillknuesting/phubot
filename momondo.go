@@ -140,6 +140,7 @@ func (t *MomondoFlightTool) Definition() openai.Tool {
 					"adults":      map[string]any{"type": "string", "description": "Number of adults (default: 2)"},
 					"children":    map[string]any{"type": "string", "description": "Children ages, e.g. '10-10' for two 10-year-olds (default: none)"},
 					"sort":        map[string]any{"type": "string", "description": "Sort order: 'price' (cheapest first, default) or 'duration' (fastest first)"},
+					"stops":       map[string]any{"type": "string", "description": "Filter by stops: '0' for direct flights only, '1' for max 1 stop, '2' for max 2 stops (default: show all)"},
 				},
 				"required": []string{"origin", "destination", "date"},
 			},
@@ -152,6 +153,9 @@ func (t *MomondoFlightTool) Execute(args string) (string, error) {
 }
 
 func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string) (string, error) {
+	log.Printf("[Momondo] ExecuteWithContext called: %s", args)
+	searchStart := time.Now()
+
 	var params struct {
 		Origin      string `json:"origin"`
 		Destination string `json:"destination"`
@@ -159,11 +163,15 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 		Adults      string `json:"adults"`
 		Children    string `json:"children"`
 		Sort        string `json:"sort"`
+		Stops       string `json:"stops"`
 	}
 
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
+		log.Printf("[Momondo] Failed to parse args: %v", err)
 		return "", fmt.Errorf("failed to parse args: %v", err)
 	}
+
+	log.Printf("[Momondo] Search request: %s → %s, date=%s, adults=%s, children=%s, sort=%s, stops=%s", params.Origin, params.Destination, params.Date, params.Adults, params.Children, params.Sort, params.Stops)
 
 	if params.Origin == "" || params.Destination == "" || params.Date == "" {
 		return "", fmt.Errorf("origin, destination, and date are required")
@@ -193,11 +201,17 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 		sortBy = "duration"
 	}
 
-	targetURL := buildMomondoURL(params.Origin, params.Destination, params.Date, "", adults, params.Children, sortBy)
+	targetURL := buildMomondoURL(params.Origin, params.Destination, params.Date, "", adults, params.Children, sortBy, params.Stops)
 
+	stopsLabel := "all"
+	if params.Stops == "0" {
+		stopsLabel = "direct only"
+	} else if params.Stops != "" {
+		stopsLabel = "max " + params.Stops + " stop(s)"
+	}
 	log.Printf("[Momondo] Searching: %s", targetURL)
-	log.Printf("[Momondo] Params: origin=%s, dest=%s, date=%s, adults=%d, sort=%s", params.Origin, params.Destination, params.Date, adults, sortBy)
-	t.progress(fmt.Sprintf("🔍 Searching %s → %s on %s (%d adults)...", params.Origin, params.Destination, params.Date, adults))
+	log.Printf("[Momondo] Params: origin=%s, dest=%s, date=%s, adults=%d, sort=%s, stops=%s", params.Origin, params.Destination, params.Date, adults, sortBy, stopsLabel)
+	t.progress(fmt.Sprintf("🔍 Searching %s → %s on %s (%d adults, %s)...", params.Origin, params.Destination, params.Date, adults, stopsLabel))
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", t.headless),
@@ -242,9 +256,11 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 		`, nil),
 	)
 	if err != nil {
+		log.Printf("[Momondo] Navigation to %s failed after %v: %v", targetURL, time.Since(searchStart), err)
 		return "", fmt.Errorf("navigation failed: %v", err)
 	}
 
+	log.Printf("[Momondo] Page loaded, starting poll for flight results (headless: %v)", t.headless)
 	t.progress("🌐 Page loaded, waiting for flight results...")
 
 	var bodyText string
@@ -370,12 +386,13 @@ func (t *MomondoFlightTool) ExecuteWithContext(ctx context.Context, args string)
 
 	t.setCache(cacheKey, sb.String(), params.Origin, params.Destination, params.Date, result.Count)
 
+	log.Printf("[Momondo] Search completed in %v: %d flights found for %s→%s on %s", time.Since(searchStart).Round(time.Millisecond), result.Count, params.Origin, params.Destination, params.Date)
 	t.progress(fmt.Sprintf("✅ Done! Found %d flights, cheapest: %s", result.Count, result.Cheapest))
 
 	return sb.String(), nil
 }
 
-func buildMomondoURL(origin, dest, date, returnDate string, adults int, children, sortBy string) string {
+func buildMomondoURL(origin, dest, date, returnDate string, adults int, children, sortBy, stops string) string {
 	path := fmt.Sprintf("/flight-search/%s-%s/%s/%dadults", origin, dest, date, adults)
 	if returnDate != "" {
 		path += fmt.Sprintf("/%s", returnDate)
@@ -392,10 +409,16 @@ func buildMomondoURL(origin, dest, date, returnDate string, adults int, children
 		sortParam = "duration_a"
 	}
 
-	return fmt.Sprintf("https://www.momondo.de%s?sort=%s", path, sortParam)
+	url := fmt.Sprintf("https://www.momondo.de%s?sort=%s", path, sortParam)
+	if stops != "" {
+		url += fmt.Sprintf("&stops=%s", stops)
+	}
+	return url
 }
 
 func scrollAndWait(ctx context.Context) {
+	log.Printf("[Momondo] Starting page scroll (30 scrolls, ~18s total)")
+	scrollStart := time.Now()
 	chromedp.Run(ctx,
 		chromedp.Evaluate(`
 			for (let i = 0; i < 30; i++) {
@@ -404,13 +427,16 @@ func scrollAndWait(ctx context.Context) {
 		`, nil),
 		chromedp.Sleep(6*time.Second),
 	)
+	log.Printf("[Momondo] Page scroll completed in %v", time.Since(scrollStart).Round(time.Millisecond))
 }
 
 func ParseMomondoFlights(body string) []Flight {
+	parseStart := time.Now()
 	body = strings.ReplaceAll(body, "\u00a0", " ")
 
 	var flights []Flight
 	lines := strings.Split(body, "\n")
+	log.Printf("[Momondo] ParseMomondoFlights: processing %d lines (%d chars)", len(lines), len(body))
 
 	reTime := regexp.MustCompile(`^\d{1,2}:\d{2}\s*[–-]\s*\d{1,2}:\d{2}(?:\+\d)?$`)
 	reDurationShort := regexp.MustCompile(`^\d{1,2}:\d{2}\s+Std\.$`)
@@ -597,6 +623,15 @@ func ParseMomondoFlights(body string) []Flight {
 		return flights[i].DurationMin < flights[j].DurationMin
 	})
 
+	log.Printf("[Momondo] ParseMomondoFlights: found %d flights in %v", len(flights), time.Since(parseStart).Round(time.Millisecond))
+	if len(flights) == 0 {
+		preview := body
+		if len(preview) > 500 {
+			preview = preview[:500]
+		}
+		log.Printf("[Momondo] ParseMomondoFlights: no flights found, first 500 chars of body: %q", preview)
+	}
+
 	return flights
 }
 
@@ -661,6 +696,12 @@ func AppendPriceHistory(entry PriceEntry) error {
 		return fmt.Errorf("write price entry: %w", err)
 	}
 
+	log.Printf("[Momondo] Price history appended: %s→%s %s, %d flights, cheapest=%v", entry.Origin, entry.Destination, entry.Date, entry.Count, func() string {
+		if entry.Cheapest != nil {
+			return entry.Cheapest.Total
+		}
+		return "n/a"
+	}())
 	return nil
 }
 
@@ -675,6 +716,7 @@ func LoadPriceHistory() ([]PriceEntry, error) {
 	}
 
 	var entries []PriceEntry
+	skipped := 0
 	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -682,9 +724,11 @@ func LoadPriceHistory() ([]PriceEntry, error) {
 		}
 		var entry PriceEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			skipped++
 			continue
 		}
 		entries = append(entries, entry)
 	}
+	log.Printf("[Momondo] Loaded price history: %d entries, %d skipped", len(entries), skipped)
 	return entries, nil
 }
