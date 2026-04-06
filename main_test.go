@@ -6027,3 +6027,256 @@ func TestCompactInBackground_CalledAfterChatDoesNotCrash(t *testing.T) {
 	agent.CompactInBackground(context.Background())
 	time.Sleep(100 * time.Millisecond)
 }
+
+// ==========================================
+// BRAVE SEARCH TOOL TESTS
+// ==========================================
+
+func TestBraveSearchTool_Name(t *testing.T) {
+	tool := NewBraveSearchTool("test-key")
+	if tool.Name() != "web_search" {
+		t.Fatalf("expected name 'web_search', got %q", tool.Name())
+	}
+}
+
+func TestBraveSearchTool_Definition(t *testing.T) {
+	tool := NewBraveSearchTool("test-key")
+	def := tool.Definition()
+	if def.Type != openai.ToolTypeFunction {
+		t.Fatalf("expected tool type function, got %q", def.Type)
+	}
+	if def.Function.Name != "web_search" {
+		t.Fatalf("expected function name 'web_search', got %q", def.Function.Name)
+	}
+	if def.Function.Description == "" {
+		t.Fatal("expected non-empty description")
+	}
+	params, ok := def.Function.Parameters.(map[string]any)
+	if !ok {
+		t.Fatal("parameters should be a map")
+	}
+	required, ok := params["required"].([]string)
+	if !ok {
+		t.Fatal("required should be []string")
+	}
+	if len(required) != 1 || required[0] != "query" {
+		t.Fatalf("expected required=[\"query\"], got %v", required)
+	}
+}
+
+func TestBraveSearchTool_NoAPIKey(t *testing.T) {
+	tool := NewBraveSearchTool("")
+	_, err := tool.Execute(`{"query": "test"}`)
+	if err == nil {
+		t.Fatal("expected error when API key is empty")
+	}
+	if !strings.Contains(err.Error(), "API key not configured") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBraveSearchTool_MissingQuery(t *testing.T) {
+	tool := NewBraveSearchTool("test-key")
+	_, err := tool.Execute(`{"count": "5"}`)
+	if err == nil {
+		t.Fatal("expected error when query is missing")
+	}
+	if !strings.Contains(err.Error(), "query parameter is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBraveSearchTool_InvalidArgs(t *testing.T) {
+	tool := NewBraveSearchTool("test-key")
+	_, err := tool.Execute(`not json`)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestBraveSearchTool_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Subscription-Token") != "test-key" {
+			t.Error("missing or wrong API key header")
+			w.WriteHeader(401)
+			return
+		}
+		if r.URL.Query().Get("q") != "golang testing" {
+			t.Errorf("unexpected query: %s", r.URL.Query().Get("q"))
+		}
+		if r.URL.Query().Get("count") != "5" {
+			t.Errorf("unexpected count: %s", r.URL.Query().Get("count"))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"web": map[string]any{
+				"results": []map[string]any{
+					{
+						"title":       "Go Testing Tutorial",
+						"url":         "https://example.com/go-testing",
+						"description": "Learn how to write tests in Go",
+					},
+					{
+						"title":       "Advanced Go Testing",
+						"url":         "https://example.com/advanced",
+						"description": "Advanced testing techniques",
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	tool := NewBraveSearchTool("test-key")
+	tool.baseURL = server.URL
+
+	result, err := tool.Execute(`{"query": "golang testing"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "Go Testing Tutorial") {
+		t.Fatalf("expected result to contain 'Go Testing Tutorial', got: %s", result)
+	}
+	if !strings.Contains(result, "https://example.com/go-testing") {
+		t.Fatalf("expected result to contain URL, got: %s", result)
+	}
+	if !strings.Contains(result, `Found 2 results`) {
+		t.Fatalf("expected 'Found 2 results', got: %s", result)
+	}
+}
+
+func TestBraveSearchTool_CustomCount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("count") != "3" {
+			t.Errorf("expected count=3, got %s", r.URL.Query().Get("count"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"web": map[string]any{
+				"results": []map[string]any{
+					{"title": "A", "url": "https://a.com", "description": "desc a"},
+					{"title": "B", "url": "https://b.com", "description": "desc b"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	tool := NewBraveSearchTool("test-key")
+	tool.baseURL = server.URL
+
+	result, err := tool.Execute(`{"query": "test", "count": "3"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "Found 2 results") {
+		t.Fatalf("expected results, got: %s", result)
+	}
+}
+
+func TestBraveSearchTool_EmptyResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"web": map[string]any{
+				"results": []map[string]any{},
+			},
+		})
+	}))
+	defer server.Close()
+
+	tool := NewBraveSearchTool("test-key")
+	tool.baseURL = server.URL
+
+	result, err := tool.Execute(`{"query": "obscure query"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "No results found") {
+		t.Fatalf("expected 'No results found', got: %s", result)
+	}
+}
+
+func TestBraveSearchTool_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(429)
+		fmt.Fprint(w, "rate limited")
+	}))
+	defer server.Close()
+
+	tool := NewBraveSearchTool("test-key")
+	tool.baseURL = server.URL
+
+	_, err := tool.Execute(`{"query": "test"}`)
+	if err == nil {
+		t.Fatal("expected error for API error response")
+	}
+	if !strings.Contains(err.Error(), "429") {
+		t.Fatalf("expected 429 in error, got: %v", err)
+	}
+}
+
+func TestBraveSearchTool_CountClampedToMax(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("count") != "5" {
+			t.Errorf("expected count to be clamped to 5, got %s", r.URL.Query().Get("count"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"web": map[string]any{"results": []map[string]any{}},
+		})
+	}))
+	defer server.Close()
+
+	tool := NewBraveSearchTool("test-key")
+	tool.baseURL = server.URL
+
+	_, err := tool.Execute(`{"query": "test", "count": "50"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBraveSearchTool_CountClampedToZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("count") != "5" {
+			t.Errorf("expected count to default to 5, got %s", r.URL.Query().Get("count"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"web": map[string]any{"results": []map[string]any{}},
+		})
+	}))
+	defer server.Close()
+
+	tool := NewBraveSearchTool("test-key")
+	tool.baseURL = server.URL
+
+	_, err := tool.Execute(`{"query": "test", "count": "-1"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBraveSearchTool_SpecialCharactersInQuery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		if q != "golang & rust: what's better?" {
+			t.Errorf("query not properly escaped: %q", q)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"web": map[string]any{"results": []map[string]any{}},
+		})
+	}))
+	defer server.Close()
+
+	tool := NewBraveSearchTool("test-key")
+	tool.baseURL = server.URL
+
+	_, err := tool.Execute(`{"query": "golang & rust: what's better?"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

@@ -626,11 +626,12 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 }
 
 type BraveSearchTool struct {
-	apiKey string
+	apiKey  string
+	baseURL string
 }
 
 func NewBraveSearchTool(apiKey string) *BraveSearchTool {
-	return &BraveSearchTool{apiKey: apiKey}
+	return &BraveSearchTool{apiKey: apiKey, baseURL: "https://api.search.brave.com/res/v1/web/search"}
 }
 
 func (t *BraveSearchTool) Name() string { return "web_search" }
@@ -677,9 +678,9 @@ func (t *BraveSearchTool) Execute(args string) (string, error) {
 
 	log.Printf("[BraveSearch] Searching: %q (count: %d)", query, count)
 
-	url := fmt.Sprintf("https://api.search.brave.com/res/v1/web/search?q=%s&count=%d", url.QueryEscape(query), count)
+	reqURL := fmt.Sprintf("%s?q=%s&count=%d", t.baseURL, url.QueryEscape(query), count)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
