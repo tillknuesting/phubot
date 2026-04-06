@@ -684,7 +684,6 @@ func (t *BraveSearchTool) Execute(args string) (string, error) {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Set("X-Subscription-Token", t.apiKey)
 
 	client := &http.Client{Timeout: 15 * time.Second}
