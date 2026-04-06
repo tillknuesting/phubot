@@ -76,6 +76,7 @@ type AgentConfig struct {
 	Headless        bool     `json:"headless"`
 	MaxIterations   int      `json:"max_iterations"`
 	NoHistory       bool     `json:"no_history"`
+	BraveAPIKey     string   `json:"brave_api_key"`
 }
 
 type MemoryConfig struct {
@@ -182,6 +183,10 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ALLOWED_USERS"); v != "" {
 		c.Telegram.AllowedUsers = v
 		log.Printf("[Config] Override: Allowed users set from ALLOWED_USERS: %s", v)
+	}
+	if v := os.Getenv("BRAVE_API_KEY"); v != "" {
+		c.Agent.BraveAPIKey = v
+		log.Printf("[Config] Override: Brave API key set from BRAVE_API_KEY")
 	}
 }
 

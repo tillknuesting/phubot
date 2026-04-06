@@ -55,7 +55,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -620,6 +623,108 @@ func (t *BrowserTool) Execute(args string) (string, error) {
 	t.progress(fmt.Sprintf("✅ Page loaded (%d chars extracted)", len(pageText)))
 
 	return "BROWSER EXTRACTED:\n" + pageText, nil
+}
+
+type BraveSearchTool struct {
+	apiKey string
+}
+
+func NewBraveSearchTool(apiKey string) *BraveSearchTool {
+	return &BraveSearchTool{apiKey: apiKey}
+}
+
+func (t *BraveSearchTool) Name() string { return "web_search" }
+
+func (t *BraveSearchTool) Definition() openai.Tool {
+	return openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        t.Name(),
+			Description: "Search the web using Brave Search. Returns top search results with titles, URLs, and descriptions. Use this to find current information, look up facts, or research topics.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string", "description": "The search query"},
+					"count": map[string]any{"type": "string", "description": "Number of results to return (default 5, max 10)"},
+				},
+				"required": []string{"query"},
+			},
+		},
+	}
+}
+
+func (t *BraveSearchTool) Execute(args string) (string, error) {
+	if t.apiKey == "" {
+		return "", fmt.Errorf("Brave API key not configured")
+	}
+
+	var parsedArgs map[string]string
+	if err := json.Unmarshal([]byte(args), &parsedArgs); err != nil {
+		return "", fmt.Errorf("failed to parse tool args: %v", err)
+	}
+
+	query := parsedArgs["query"]
+	if query == "" {
+		return "", fmt.Errorf("query parameter is required")
+	}
+
+	count := 5
+	if c, ok := parsedArgs["count"]; ok {
+		if v, err := strconv.Atoi(c); err == nil && v > 0 && v <= 10 {
+			count = v
+		}
+	}
+
+	log.Printf("[BraveSearch] Searching: %q (count: %d)", query, count)
+
+	url := fmt.Sprintf("https://api.search.brave.com/res/v1/web/search?q=%s&count=%d", url.QueryEscape(query), count)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("X-Subscription-Token", t.apiKey)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("Brave API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("Brave API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Web struct {
+			Results []struct {
+				Title       string `json:"title"`
+				URL         string `json:"url"`
+				Description string `json:"description"`
+			} `json:"results"`
+		} `json:"web"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode Brave response: %v", err)
+	}
+
+	if len(result.Web.Results) == 0 {
+		return "No results found for query: " + query, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Found %d results for %q:\n\n", len(result.Web.Results), query))
+	for i, r := range result.Web.Results {
+		sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   %s\n\n", i+1, r.Title, r.URL, r.Description))
+	}
+
+	log.Printf("[BraveSearch] Returned %d results for %q", len(result.Web.Results), query)
+	return sb.String(), nil
 }
 
 // ==========================================
@@ -2677,6 +2782,7 @@ func main() {
 	agent.RegisterTool(NewMomondoFlightTool(cfg.Agent.Headless))
 	agent.RegisterTool(NewBrowserTool(cfg.Agent.Headless))
 	agent.RegisterTool(NewIdentifyAircraftTool(cfg.Agent.Headless))
+	agent.RegisterTool(NewBraveSearchTool(cfg.Agent.BraveAPIKey))
 
 	agent.mu.RLock()
 	mi := agent.maxIterations
